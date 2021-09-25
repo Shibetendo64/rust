@@ -14,17 +14,17 @@ pub fn anonymize_predicate<'tcx>(
     tcx.reuse_or_mk_predicate(pred, new)
 }
 
-struct PredicateSet<'tcx> {
+pub struct PredicateSet<'tcx> {
     tcx: TyCtxt<'tcx>,
     set: FxHashSet<ty::Predicate<'tcx>>,
 }
 
 impl PredicateSet<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         Self { tcx, set: Default::default() }
     }
 
-    fn insert(&mut self, pred: ty::Predicate<'tcx>) -> bool {
+    pub fn insert(&mut self, pred: ty::Predicate<'tcx>) -> bool {
         // We have to be careful here because we want
         //
         //    for<'a> Foo<&'a i32>
@@ -124,7 +124,7 @@ impl Elaborator<'tcx> {
 
         let bound_predicate = obligation.predicate.kind();
         match bound_predicate.skip_binder() {
-            ty::PredicateKind::Trait(data, _) => {
+            ty::PredicateKind::Trait(data) => {
                 // Get predicates declared on the trait.
                 let predicates = tcx.super_predicates_of(data.def_id());
 
@@ -156,6 +156,10 @@ impl Elaborator<'tcx> {
             }
             ty::PredicateKind::Subtype(..) => {
                 // Currently, we do not "elaborate" predicates like `X <: Y`,
+                // though conceivably we might.
+            }
+            ty::PredicateKind::Coerce(..) => {
+                // Currently, we do not "elaborate" predicates like `X -> Y`,
                 // though conceivably we might.
             }
             ty::PredicateKind::Projection(..) => {
@@ -227,6 +231,7 @@ impl Elaborator<'tcx> {
                                 None
                             }
                         })
+                        .map(ty::Binder::dummy)
                         .map(|predicate_kind| predicate_kind.to_predicate(tcx))
                         .filter(|&predicate| visited.insert(predicate))
                         .map(|predicate| {
@@ -305,9 +310,7 @@ pub fn transitive_bounds_that_define_assoc_type<'tcx>(
                     Some(assoc_name),
                 ));
                 for (super_predicate, _) in super_predicates.predicates {
-                    let bound_predicate = super_predicate.kind();
-                    let subst_predicate = super_predicate
-                        .subst_supertrait(tcx, &bound_predicate.rebind(trait_ref.skip_binder()));
+                    let subst_predicate = super_predicate.subst_supertrait(tcx, &trait_ref);
                     if let Some(binder) = subst_predicate.to_opt_poly_trait_ref() {
                         stack.push(binder.value);
                     }

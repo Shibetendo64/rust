@@ -71,8 +71,18 @@ impl<T: Sized> NonNull<T> {
     /// a `T`, which means this must not be used as a "not yet initialized"
     /// sentinel value. Types that lazily allocate must track initialization by
     /// some other means.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ptr::NonNull;
+    ///
+    /// let ptr = NonNull::<u32>::dangling();
+    /// // Important: don't try to access the value of `ptr` without
+    /// // initializing it first! The pointer is not null but isn't valid either!
+    /// ```
     #[stable(feature = "nonnull", since = "1.25.0")]
-    #[rustc_const_stable(feature = "const_nonnull_dangling", since = "1.32.0")]
+    #[rustc_const_stable(feature = "const_nonnull_dangling", since = "1.36.0")]
     #[inline]
     pub const fn dangling() -> Self {
         // SAFETY: mem::align_of() returns a non-zero usize which is then casted
@@ -110,7 +120,7 @@ impl<T: Sized> NonNull<T> {
     /// [the module documentation]: crate::ptr#safety
     #[inline]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    pub unsafe fn as_uninit_ref(&self) -> &MaybeUninit<T> {
+    pub unsafe fn as_uninit_ref<'a>(&self) -> &'a MaybeUninit<T> {
         // SAFETY: the caller must guarantee that `self` meets all the
         // requirements for a reference.
         unsafe { &*self.cast().as_ptr() }
@@ -142,7 +152,7 @@ impl<T: Sized> NonNull<T> {
     /// [the module documentation]: crate::ptr#safety
     #[inline]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    pub unsafe fn as_uninit_mut(&mut self) -> &mut MaybeUninit<T> {
+    pub unsafe fn as_uninit_mut<'a>(&mut self) -> &'a mut MaybeUninit<T> {
         // SAFETY: the caller must guarantee that `self` meets all the
         // requirements for a reference.
         unsafe { &mut *self.cast().as_ptr() }
@@ -155,8 +165,26 @@ impl<T: ?Sized> NonNull<T> {
     /// # Safety
     ///
     /// `ptr` must be non-null.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut x = 0u32;
+    /// let ptr = unsafe { NonNull::new_unchecked(&mut x as *mut _) };
+    /// ```
+    ///
+    /// *Incorrect* usage of this function:
+    ///
+    /// ```rust,no_run
+    /// use std::ptr::NonNull;
+    ///
+    /// // NEVER DO THAT!!! This is undefined behavior. ⚠️
+    /// let ptr = unsafe { NonNull::<u32>::new_unchecked(std::ptr::null_mut()) };
+    /// ```
     #[stable(feature = "nonnull", since = "1.25.0")]
-    #[rustc_const_stable(feature = "const_nonnull_new_unchecked", since = "1.32.0")]
+    #[rustc_const_stable(feature = "const_nonnull_new_unchecked", since = "1.25.0")]
     #[inline]
     pub const unsafe fn new_unchecked(ptr: *mut T) -> Self {
         // SAFETY: the caller must guarantee that `ptr` is non-null.
@@ -164,6 +192,19 @@ impl<T: ?Sized> NonNull<T> {
     }
 
     /// Creates a new `NonNull` if `ptr` is non-null.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut x = 0u32;
+    /// let ptr = NonNull::<u32>::new(&mut x as *mut _).expect("ptr is null!");
+    ///
+    /// if let Some(ptr) = NonNull::<u32>::new(std::ptr::null_mut()) {
+    ///     unreachable!();
+    /// }
+    /// ```
     #[stable(feature = "nonnull", since = "1.25.0")]
     #[inline]
     pub fn new(ptr: *mut T) -> Option<Self> {
@@ -181,7 +222,6 @@ impl<T: ?Sized> NonNull<T> {
     /// See the documentation of [`std::ptr::from_raw_parts`] for more details.
     ///
     /// [`std::ptr::from_raw_parts`]: crate::ptr::from_raw_parts
-    #[cfg(not(bootstrap))]
     #[unstable(feature = "ptr_metadata", issue = "81513")]
     #[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
     #[inline]
@@ -195,10 +235,9 @@ impl<T: ?Sized> NonNull<T> {
         }
     }
 
-    /// Decompose a (possibly wide) pointer into is address and metadata components.
+    /// Decompose a (possibly wide) pointer into its address and metadata components.
     ///
     /// The pointer can be later reconstructed with [`NonNull::from_raw_parts`].
-    #[cfg(not(bootstrap))]
     #[unstable(feature = "ptr_metadata", issue = "81513")]
     #[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
     #[inline]
@@ -207,6 +246,22 @@ impl<T: ?Sized> NonNull<T> {
     }
 
     /// Acquires the underlying `*mut` pointer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut x = 0u32;
+    /// let ptr = NonNull::new(&mut x).expect("ptr is null!");
+    ///
+    /// let x_value = unsafe { *ptr.as_ptr() };
+    /// assert_eq!(x_value, 0);
+    ///
+    /// unsafe { *ptr.as_ptr() += 2; }
+    /// let x_value = unsafe { *ptr.as_ptr() };
+    /// assert_eq!(x_value, 2);
+    /// ```
     #[stable(feature = "nonnull", since = "1.25.0")]
     #[rustc_const_stable(feature = "const_nonnull_as_ptr", since = "1.32.0")]
     #[inline]
@@ -241,10 +296,22 @@ impl<T: ?Sized> NonNull<T> {
     /// (The part about being initialized is not yet fully decided, but until
     /// it is, the only safe approach is to ensure that they are indeed initialized.)
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut x = 0u32;
+    /// let ptr = NonNull::new(&mut x as *mut _).expect("ptr is null!");
+    ///
+    /// let ref_x = unsafe { ptr.as_ref() };
+    /// println!("{}", ref_x);
+    /// ```
+    ///
     /// [the module documentation]: crate::ptr#safety
     #[stable(feature = "nonnull", since = "1.25.0")]
     #[inline]
-    pub unsafe fn as_ref(&self) -> &T {
+    pub unsafe fn as_ref<'a>(&self) -> &'a T {
         // SAFETY: the caller must guarantee that `self` meets all the
         // requirements for a reference.
         unsafe { &*self.as_ptr() }
@@ -276,19 +343,44 @@ impl<T: ?Sized> NonNull<T> {
     /// This applies even if the result of this method is unused!
     /// (The part about being initialized is not yet fully decided, but until
     /// it is, the only safe approach is to ensure that they are indeed initialized.)
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut x = 0u32;
+    /// let mut ptr = NonNull::new(&mut x).expect("null pointer");
+    ///
+    /// let x_ref = unsafe { ptr.as_mut() };
+    /// assert_eq!(*x_ref, 0);
+    /// *x_ref += 2;
+    /// assert_eq!(*x_ref, 2);
+    /// ```
     ///
     /// [the module documentation]: crate::ptr#safety
     #[stable(feature = "nonnull", since = "1.25.0")]
     #[inline]
-    pub unsafe fn as_mut(&mut self) -> &mut T {
+    pub unsafe fn as_mut<'a>(&mut self) -> &'a mut T {
         // SAFETY: the caller must guarantee that `self` meets all the
         // requirements for a mutable reference.
         unsafe { &mut *self.as_ptr() }
     }
 
     /// Casts to a pointer of another type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut x = 0u32;
+    /// let ptr = NonNull::new(&mut x as *mut _).expect("null pointer");
+    ///
+    /// let casted_ptr = ptr.cast::<i8>();
+    /// let raw_ptr: *mut i8 = casted_ptr.as_ptr();
+    /// ```
     #[stable(feature = "nonnull_cast", since = "1.27.0")]
-    #[rustc_const_stable(feature = "const_nonnull_cast", since = "1.32.0")]
+    #[rustc_const_stable(feature = "const_nonnull_cast", since = "1.36.0")]
     #[inline]
     pub const fn cast<U>(self) -> NonNull<U> {
         // SAFETY: `self` is a `NonNull` pointer which is necessarily non-null
@@ -427,7 +519,7 @@ impl<T> NonNull<[T]> {
     /// [valid]: crate::ptr#safety
     #[inline]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    pub unsafe fn as_uninit_slice(&self) -> &[MaybeUninit<T>] {
+    pub unsafe fn as_uninit_slice<'a>(&self) -> &'a [MaybeUninit<T>] {
         // SAFETY: the caller must uphold the safety contract for `as_uninit_slice`.
         unsafe { slice::from_raw_parts(self.cast().as_ptr(), self.len()) }
     }
@@ -488,7 +580,7 @@ impl<T> NonNull<[T]> {
     /// ```
     #[inline]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    pub unsafe fn as_uninit_slice_mut(&self) -> &mut [MaybeUninit<T>] {
+    pub unsafe fn as_uninit_slice_mut<'a>(&self) -> &'a mut [MaybeUninit<T>] {
         // SAFETY: the caller must uphold the safety contract for `as_uninit_slice_mut`.
         unsafe { slice::from_raw_parts_mut(self.cast().as_ptr(), self.len()) }
     }
@@ -521,7 +613,7 @@ impl<T> NonNull<[T]> {
         I: SliceIndex<[T]>,
     {
         // SAFETY: the caller ensures that `self` is dereferencable and `index` in-bounds.
-        // As a consequence, the resulting pointer cannot be NULL.
+        // As a consequence, the resulting pointer cannot be null.
         unsafe { NonNull::new_unchecked(self.as_ptr().get_unchecked_mut(index)) }
     }
 }

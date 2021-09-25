@@ -1,4 +1,4 @@
-use core::iter::{InPlaceIterable, SourceIter};
+use core::iter::{InPlaceIterable, SourceIter, TrustedRandomAccessNoCoerce};
 use core::mem::{self, ManuallyDrop};
 use core::ptr::{self};
 
@@ -52,40 +52,40 @@ where
             )
         };
 
-        // use try-fold since
-        // - it vectorizes better for some iterator adapters
-        // - unlike most internal iteration methods, it only takes a &mut self
-        // - it lets us thread the write pointer through its innards and get it back in the end
-        let sink = InPlaceDrop { inner: dst_buf, dst: dst_buf };
-        let sink = iterator
-            .try_fold::<_, _, Result<_, !>>(sink, write_in_place_with_drop(dst_end))
-            .unwrap();
-        // iteration succeeded, don't drop head
-        let dst = ManuallyDrop::new(sink).dst;
+        let len = SpecInPlaceCollect::collect_in_place(&mut iterator, dst_buf, dst_end);
 
         let src = unsafe { iterator.as_inner().as_into_iter() };
         // check if SourceIter contract was upheld
-        // caveat: if they weren't we may not even make it to this point
+        // caveat: if they weren't we might not even make it to this point
         debug_assert_eq!(src_buf, src.buf.as_ptr());
         // check InPlaceIterable contract. This is only possible if the iterator advanced the
         // source pointer at all. If it uses unchecked access via TrustedRandomAccess
         // then the source pointer will stay in its initial position and we can't use it as reference
         if src.ptr != src_ptr {
             debug_assert!(
-                dst as *const _ <= src.ptr,
+                unsafe { dst_buf.add(len) as *const _ } <= src.ptr,
                 "InPlaceIterable contract violation, write pointer advanced beyond read pointer"
             );
         }
 
         // drop any remaining values at the tail of the source
-        src.drop_remaining();
         // but prevent drop of the allocation itself once IntoIter goes out of scope
-        src.forget_allocation();
+        // if the drop panics then we also leak any elements collected into dst_buf
+        //
+        // FIXME: Since `SpecInPlaceCollect::collect_in_place` above might use
+        // `__iterator_get_unchecked` internally, this call might be operating on
+        // a `vec::IntoIter` with incorrect internal state regarding which elements
+        // have already been “consumed”. However, the `TrustedRandomIteratorNoCoerce`
+        // implementation of `vec::IntoIter` is only present if the `Vec` elements
+        // don’t have a destructor, so it doesn’t matter if elements are “dropped multiple times”
+        // in this case.
+        // This argument technically currently lacks justification from the `# Safety` docs for
+        // `SourceIter`/`InPlaceIterable` and/or `TrustedRandomAccess`, so it might be possible that
+        // someone could inadvertently create new library unsoundness
+        // involving this `.forget_allocation_drop_remaining()` call.
+        src.forget_allocation_drop_remaining();
 
-        let vec = unsafe {
-            let len = dst.offset_from(dst_buf) as usize;
-            Vec::from_raw_parts(dst_buf, len, cap)
-        };
+        let vec = unsafe { Vec::from_raw_parts(dst_buf, len, cap) };
 
         vec
     }
@@ -101,8 +101,66 @@ fn write_in_place_with_drop<T>(
             // all we can do is check if it's still in range
             debug_assert!(sink.dst as *const _ <= src_end, "InPlaceIterable contract violation");
             ptr::write(sink.dst, item);
+            // Since this executes user code which can panic we have to bump the pointer
+            // after each step.
             sink.dst = sink.dst.add(1);
         }
         Ok(sink)
+    }
+}
+
+/// Helper trait to hold specialized implementations of the in-place iterate-collect loop
+trait SpecInPlaceCollect<T, I>: Iterator<Item = T> {
+    /// Collects an iterator (`self`) into the destination buffer (`dst`) and returns the number of items
+    /// collected. `end` is the last writable element of the allocation and used for bounds checks.
+    ///
+    /// This method is specialized and one of its implementations makes use of
+    /// `Iterator::__iterator_get_unchecked` calls with a `TrustedRandomAccessNoCoerce` bound
+    /// on `I` which means the caller of this method must take the safety conditions
+    /// of that trait into consideration.
+    fn collect_in_place(&mut self, dst: *mut T, end: *const T) -> usize;
+}
+
+impl<T, I> SpecInPlaceCollect<T, I> for I
+where
+    I: Iterator<Item = T>,
+{
+    #[inline]
+    default fn collect_in_place(&mut self, dst_buf: *mut T, end: *const T) -> usize {
+        // use try-fold since
+        // - it vectorizes better for some iterator adapters
+        // - unlike most internal iteration methods, it only takes a &mut self
+        // - it lets us thread the write pointer through its innards and get it back in the end
+        let sink = InPlaceDrop { inner: dst_buf, dst: dst_buf };
+        let sink =
+            self.try_fold::<_, _, Result<_, !>>(sink, write_in_place_with_drop(end)).unwrap();
+        // iteration succeeded, don't drop head
+        unsafe { ManuallyDrop::new(sink).dst.offset_from(dst_buf) as usize }
+    }
+}
+
+impl<T, I> SpecInPlaceCollect<T, I> for I
+where
+    I: Iterator<Item = T> + TrustedRandomAccessNoCoerce,
+{
+    #[inline]
+    fn collect_in_place(&mut self, dst_buf: *mut T, end: *const T) -> usize {
+        let len = self.size();
+        let mut drop_guard = InPlaceDrop { inner: dst_buf, dst: dst_buf };
+        for i in 0..len {
+            // Safety: InplaceIterable contract guarantees that for every element we read
+            // one slot in the underlying storage will have been freed up and we can immediately
+            // write back the result.
+            unsafe {
+                let dst = dst_buf.offset(i as isize);
+                debug_assert!(dst as *const _ <= end, "InPlaceIterable contract violation");
+                ptr::write(dst, self.__iterator_get_unchecked(i));
+                // Since this executes user code which can panic we have to bump the pointer
+                // after each step.
+                drop_guard.dst = dst.add(1);
+            }
+        }
+        mem::forget(drop_guard);
+        len
     }
 }

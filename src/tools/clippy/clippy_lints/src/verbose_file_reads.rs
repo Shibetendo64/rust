@@ -1,19 +1,20 @@
-use crate::utils::{match_type, paths, span_lint_and_help};
+use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::paths;
+use clippy_utils::ty::match_type;
 use if_chain::if_chain;
 use rustc_hir::{Expr, ExprKind, QPath};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for use of File::read_to_end and File::read_to_string.
+    /// ### What it does
+    /// Checks for use of File::read_to_end and File::read_to_string.
     ///
-    /// **Why is this bad?** `fs::{read, read_to_string}` provide the same functionality when `buf` is empty with fewer imports and no intermediate values.
+    /// ### Why is this bad?
+    /// `fs::{read, read_to_string}` provide the same functionality when `buf` is empty with fewer imports and no intermediate values.
     /// See also: [fs::read docs](https://doc.rust-lang.org/std/fs/fn.read.html), [fs::read_to_string docs](https://doc.rust-lang.org/std/fs/fn.read_to_string.html)
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust,no_run
     /// # use std::io::Read;
     /// # use std::fs::File;
@@ -52,7 +53,7 @@ impl<'tcx> LateLintPass<'tcx> for VerboseFileReads {
                 "use of `File::read_to_string`",
                 None,
                 "consider using `fs::read_to_string` instead",
-            )
+            );
         }
     }
 }

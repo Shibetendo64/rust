@@ -37,9 +37,3 @@ pub fn bar() {}
 /// Damn enum's variants: [Enum::A#whatever].
 //~^ ERROR `Enum::A#whatever` contains an anchor
 pub fn enum_link() {}
-
-/// Primitives?
-///
-/// [u32#hello]
-//~^ ERROR `u32#hello` contains an anchor
-pub fn x() {}

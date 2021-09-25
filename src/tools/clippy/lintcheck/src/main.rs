@@ -5,7 +5,7 @@
 // When a new lint is introduced, we can search the results for new warnings and check for false
 // positives.
 
-#![allow(clippy::filter_map, clippy::collapsible_else_if)]
+#![allow(clippy::collapsible_else_if)]
 
 use std::ffi::OsStr;
 use std::process::Command;
@@ -21,9 +21,17 @@ use clap::{App, Arg, ArgMatches};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use walkdir::{DirEntry, WalkDir};
 
+#[cfg(not(windows))]
 const CLIPPY_DRIVER_PATH: &str = "target/debug/clippy-driver";
+#[cfg(not(windows))]
 const CARGO_CLIPPY_PATH: &str = "target/debug/cargo-clippy";
+
+#[cfg(windows)]
+const CLIPPY_DRIVER_PATH: &str = "target/debug/clippy-driver.exe";
+#[cfg(windows)]
+const CARGO_CLIPPY_PATH: &str = "target/debug/cargo-clippy.exe";
 
 const LINTCHECK_DOWNLOADS: &str = "target/lintcheck/downloads";
 const LINTCHECK_SOURCES: &str = "target/lintcheck/sources";
@@ -186,32 +194,41 @@ impl CrateSource {
                 }
             },
             CrateSource::Path { name, path, options } => {
-                use fs_extra::dir;
+                // copy path into the dest_crate_root but skip directories that contain a CACHEDIR.TAG file.
+                // The target/ directory contains a CACHEDIR.TAG file so it is the most commonly skipped directory
+                // as a result of this filter.
+                let dest_crate_root = PathBuf::from(LINTCHECK_SOURCES).join(name);
+                if dest_crate_root.exists() {
+                    println!("Deleting existing directory at {:?}", dest_crate_root);
+                    std::fs::remove_dir_all(&dest_crate_root).unwrap();
+                }
 
-                // simply copy the entire directory into our target dir
-                let copy_dest = PathBuf::from(format!("{}/", LINTCHECK_SOURCES));
+                println!("Copying {:?} to {:?}", path, dest_crate_root);
 
-                // the source path of the crate we copied,  ${copy_dest}/crate_name
-                let crate_root = copy_dest.join(name); // .../crates/local_crate
+                fn is_cache_dir(entry: &DirEntry) -> bool {
+                    std::fs::read(entry.path().join("CACHEDIR.TAG"))
+                        .map(|x| x.starts_with(b"Signature: 8a477f597d28d172789f06886806bc55"))
+                        .unwrap_or(false)
+                }
 
-                if crate_root.exists() {
-                    println!(
-                        "Not copying {} to {}, destination already exists",
-                        path.display(),
-                        crate_root.display()
-                    );
-                } else {
-                    println!("Copying {} to {}", path.display(), copy_dest.display());
+                for entry in WalkDir::new(path).into_iter().filter_entry(|e| !is_cache_dir(e)) {
+                    let entry = entry.unwrap();
+                    let entry_path = entry.path();
+                    let relative_entry_path = entry_path.strip_prefix(path).unwrap();
+                    let dest_path = dest_crate_root.join(relative_entry_path);
+                    let metadata = entry_path.symlink_metadata().unwrap();
 
-                    dir::copy(path, &copy_dest, &dir::CopyOptions::new()).unwrap_or_else(|_| {
-                        panic!("Failed to copy from {}, to  {}", path.display(), crate_root.display())
-                    });
+                    if metadata.is_dir() {
+                        std::fs::create_dir(dest_path).unwrap();
+                    } else if metadata.is_file() {
+                        std::fs::copy(entry_path, dest_path).unwrap();
+                    }
                 }
 
                 Crate {
                     version: String::from("local"),
                     name: name.clone(),
-                    path: crate_root,
+                    path: dest_crate_root,
                     options: options.clone(),
                 }
             },
@@ -253,14 +270,7 @@ impl Crate {
         let shared_target_dir = clippy_project_root().join("target/lintcheck/shared_target_dir");
 
         let mut args = if fix {
-            vec![
-                "-Zunstable-options",
-                "--fix",
-                "-Zunstable-options",
-                "--allow-no-vcs",
-                "--",
-                "--cap-lints=warn",
-            ]
+            vec!["--fix", "--allow-no-vcs", "--", "--cap-lints=warn"]
         } else {
             vec!["--", "--message-format=json", "--", "--cap-lints=warn"]
         };
@@ -294,6 +304,14 @@ impl Crate {
             });
         let stdout = String::from_utf8_lossy(&all_output.stdout);
         let stderr = String::from_utf8_lossy(&all_output.stderr);
+        let status = &all_output.status;
+
+        if !status.success() {
+            eprintln!(
+                "\nWARNING: bad exit status after checking {} {} \n",
+                self.name, self.version
+            );
+        }
 
         if fix {
             if let Some(stderr) = stderr

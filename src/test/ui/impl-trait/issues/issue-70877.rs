@@ -1,6 +1,4 @@
 #![feature(type_alias_impl_trait)]
-#![feature(impl_trait_in_bindings)]
-#![allow(incomplete_features)]
 
 type FooArg<'a> = &'a dyn ToString;
 type FooRet = impl std::fmt::Debug;

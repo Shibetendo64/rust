@@ -1,7 +1,7 @@
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_errors::struct_span_err;
 use rustc_hir as hir;
-use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
+use rustc_hir::def_id::DefId;
 use rustc_hir::itemlikevisit::ItemLikeVisitor;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::Symbol;
@@ -9,8 +9,7 @@ use rustc_trait_selection::traits::{self, SkipLeakCheck};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 
-pub fn crate_inherent_impls_overlap_check(tcx: TyCtxt<'_>, crate_num: CrateNum) {
-    assert_eq!(crate_num, LOCAL_CRATE);
+pub fn crate_inherent_impls_overlap_check(tcx: TyCtxt<'_>, (): ()) {
     let krate = tcx.hir().krate();
     krate.visit_all_item_likes(&mut InherentOverlapChecker { tcx });
 }
@@ -24,8 +23,8 @@ impl InherentOverlapChecker<'tcx> {
     /// namespace.
     fn impls_have_common_items(
         &self,
-        impl_items1: &ty::AssociatedItems<'_>,
-        impl_items2: &ty::AssociatedItems<'_>,
+        impl_items1: &ty::AssocItems<'_>,
+        impl_items2: &ty::AssocItems<'_>,
     ) -> bool {
         let mut impl_items1 = &impl_items1;
         let mut impl_items2 = &impl_items2;
@@ -223,8 +222,8 @@ impl ItemLikeVisitor<'v> for InherentOverlapChecker<'tcx> {
                                 let id_to_set = *ids.iter().min().unwrap();
 
                                 // Sort the id list so that the algorithm is deterministic
-                                let mut ids = ids.into_iter().collect::<SmallVec<[_; 8]>>();
-                                ids.sort();
+                                let mut ids = ids.into_iter().collect::<SmallVec<[usize; 8]>>();
+                                ids.sort_unstable();
 
                                 let mut region = connected_regions.remove(&id_to_set).unwrap();
                                 region.idents.extend_from_slice(&idents_to_add);
@@ -267,8 +266,8 @@ impl ItemLikeVisitor<'v> for InherentOverlapChecker<'tcx> {
                     // for each pair of impl blocks in the same connected region.
                     for (_id, region) in connected_regions.into_iter() {
                         let mut impl_blocks =
-                            region.impl_blocks.into_iter().collect::<SmallVec<[_; 8]>>();
-                        impl_blocks.sort();
+                            region.impl_blocks.into_iter().collect::<SmallVec<[usize; 8]>>();
+                        impl_blocks.sort_unstable();
                         for (i, &impl1_items_idx) in impl_blocks.iter().enumerate() {
                             let &(&impl1_def_id, impl_items1) = &impls_items[impl1_items_idx];
                             for &impl2_items_idx in impl_blocks[(i + 1)..].iter() {

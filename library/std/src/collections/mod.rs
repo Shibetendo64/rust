@@ -239,7 +239,7 @@
 //! Iterators also provide a series of *adapter* methods for performing common
 //! threads to sequences. Among the adapters are functional favorites like `map`,
 //! `fold`, `skip` and `take`. Of particular interest to collections is the
-//! `rev` adapter, that reverses any iterator that supports this operation. Most
+//! `rev` adapter, which reverses any iterator that supports this operation. Most
 //! collections provide reversible iterators as the way to iterate over them in
 //! reverse order.
 //!
@@ -401,9 +401,11 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 
 #[stable(feature = "rust1", since = "1.0.0")]
+// FIXME(#82080) The deprecation here is only theoretical, and does not actually produce a warning.
 #[rustc_deprecated(reason = "moved to `std::ops::Bound`", since = "1.26.0")]
 #[doc(hidden)]
 pub use crate::ops::Bound;
+
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use alloc_crate::collections::{binary_heap, btree_map, btree_set};
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -420,6 +422,12 @@ pub use self::hash_set::HashSet;
 
 #[unstable(feature = "try_reserve", reason = "new API", issue = "48043")]
 pub use alloc_crate::collections::TryReserveError;
+#[unstable(
+    feature = "try_reserve_kind",
+    reason = "Uncertain how much info should be exposed",
+    issue = "48043"
+)]
+pub use alloc_crate::collections::TryReserveErrorKind;
 
 mod hash;
 

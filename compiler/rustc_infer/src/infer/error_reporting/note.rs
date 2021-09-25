@@ -74,14 +74,18 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     ),
                 );
             }
-            infer::RelateParamBound(span, t) => {
+            infer::RelateParamBound(span, t, opt_span) => {
                 label_or_note(
                     span,
                     &format!(
-                        "...so that the type `{}` will meet its required lifetime bounds",
-                        self.ty_to_string(t)
+                        "...so that the type `{}` will meet its required lifetime bounds{}",
+                        self.ty_to_string(t),
+                        if opt_span.is_some() { "..." } else { "" },
                     ),
                 );
+                if let Some(span) = opt_span {
+                    err.span_note(span, "...that is required by this bound");
+                }
             }
             infer::RelateRegionParamBound(span) => {
                 label_or_note(
@@ -90,6 +94,12 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 );
             }
             infer::CompareImplMethodObligation { span, .. } => {
+                label_or_note(
+                    span,
+                    "...so that the definition in impl matches the definition from the trait",
+                );
+            }
+            infer::CompareImplTypeObligation { span, .. } => {
                 label_or_note(
                     span,
                     "...so that the definition in impl matches the definition from the trait",
@@ -117,6 +127,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                             "",
                             sup,
                             " doesn't meet the lifetime requirements",
+                            None,
                         );
                     }
                     (_, ty::RePlaceholder(_)) => {
@@ -126,16 +137,18 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                             "the required lifetime does not necessarily outlive ",
                             sub,
                             "",
+                            None,
                         );
                     }
                     _ => {
-                        note_and_explain_region(self.tcx, &mut err, "", sup, "...");
+                        note_and_explain_region(self.tcx, &mut err, "", sup, "...", None);
                         note_and_explain_region(
                             self.tcx,
                             &mut err,
                             "...does not necessarily outlive ",
                             sub,
                             "",
+                            None,
                         );
                     }
                 }
@@ -154,6 +167,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "...the reference is valid for ",
                     sub,
                     "...",
+                    None,
                 );
                 note_and_explain_region(
                     self.tcx,
@@ -161,6 +175,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "...but the borrowed content is only valid for ",
                     sup,
                     "",
+                    None,
                 );
                 err
             }
@@ -179,6 +194,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "...the borrowed pointer is valid for ",
                     sub,
                     "...",
+                    None,
                 );
                 note_and_explain_region(
                     self.tcx,
@@ -186,6 +202,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     &format!("...but `{}` is only valid for ", var_name),
                     sup,
                     "",
+                    None,
                 );
                 err
             }
@@ -197,17 +214,25 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "lifetime of the source pointer does not outlive lifetime bound of the \
                      object type"
                 );
-                note_and_explain_region(self.tcx, &mut err, "object type is valid for ", sub, "");
+                note_and_explain_region(
+                    self.tcx,
+                    &mut err,
+                    "object type is valid for ",
+                    sub,
+                    "",
+                    None,
+                );
                 note_and_explain_region(
                     self.tcx,
                     &mut err,
                     "source pointer is only valid for ",
                     sup,
                     "",
+                    None,
                 );
                 err
             }
-            infer::RelateParamBound(span, ty) => {
+            infer::RelateParamBound(span, ty, opt_span) => {
                 let mut err = struct_span_err!(
                     self.tcx.sess,
                     span,
@@ -216,10 +241,22 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     self.ty_to_string(ty)
                 );
                 match *sub {
-                    ty::ReStatic => {
-                        note_and_explain_region(self.tcx, &mut err, "type must satisfy ", sub, "")
-                    }
-                    _ => note_and_explain_region(self.tcx, &mut err, "type must outlive ", sub, ""),
+                    ty::ReStatic => note_and_explain_region(
+                        self.tcx,
+                        &mut err,
+                        "type must satisfy ",
+                        sub,
+                        if opt_span.is_some() { " as required by this binding" } else { "" },
+                        opt_span,
+                    ),
+                    _ => note_and_explain_region(
+                        self.tcx,
+                        &mut err,
+                        "type must outlive ",
+                        sub,
+                        if opt_span.is_some() { " as required by this binding" } else { "" },
+                        opt_span,
+                    ),
                 }
                 err
             }
@@ -232,6 +269,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "lifetime parameter instantiated with ",
                     sup,
                     "",
+                    None,
                 );
                 note_and_explain_region(
                     self.tcx,
@@ -239,6 +277,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "but lifetime parameter must outlive ",
                     sub,
                     "",
+                    None,
                 );
                 err
             }
@@ -255,6 +294,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "the return value is only valid for ",
                     sup,
                     "",
+                    None,
                 );
                 err
             }
@@ -266,8 +306,22 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "a value of type `{}` is borrowed for too long",
                     self.ty_to_string(ty)
                 );
-                note_and_explain_region(self.tcx, &mut err, "the type is valid for ", sub, "");
-                note_and_explain_region(self.tcx, &mut err, "but the borrow lasts for ", sup, "");
+                note_and_explain_region(
+                    self.tcx,
+                    &mut err,
+                    "the type is valid for ",
+                    sub,
+                    "",
+                    None,
+                );
+                note_and_explain_region(
+                    self.tcx,
+                    &mut err,
+                    "but the borrow lasts for ",
+                    sup,
+                    "",
+                    None,
+                );
                 err
             }
             infer::ReferenceOutlivesReferent(ty, span) => {
@@ -278,17 +332,37 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     "in type `{}`, reference has a longer lifetime than the data it references",
                     self.ty_to_string(ty)
                 );
-                note_and_explain_region(self.tcx, &mut err, "the pointer is valid for ", sub, "");
+                note_and_explain_region(
+                    self.tcx,
+                    &mut err,
+                    "the pointer is valid for ",
+                    sub,
+                    "",
+                    None,
+                );
                 note_and_explain_region(
                     self.tcx,
                     &mut err,
                     "but the referenced data is only valid for ",
                     sup,
                     "",
+                    None,
                 );
                 err
             }
             infer::CompareImplMethodObligation {
+                span,
+                item_name,
+                impl_item_def_id,
+                trait_item_def_id,
+            } => self.report_extra_impl_obligation(
+                span,
+                item_name,
+                impl_item_def_id,
+                trait_item_def_id,
+                &format!("`{}: {}`", sup, sub),
+            ),
+            infer::CompareImplTypeObligation {
                 span,
                 item_name,
                 impl_item_def_id,

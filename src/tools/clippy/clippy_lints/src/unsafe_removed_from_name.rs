@@ -1,4 +1,4 @@
-use crate::utils::span_lint;
+use clippy_utils::diagnostics::span_lint;
 use rustc_ast::ast::{Item, ItemKind, UseTree, UseTreeKind};
 use rustc_lint::{EarlyContext, EarlyLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
@@ -6,15 +6,15 @@ use rustc_span::source_map::Span;
 use rustc_span::symbol::Ident;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for imports that remove "unsafe" from an item's
+    /// ### What it does
+    /// Checks for imports that remove "unsafe" from an item's
     /// name.
     ///
-    /// **Why is this bad?** Renaming makes it less clear which traits and
+    /// ### Why is this bad?
+    /// Renaming makes it less clear which traits and
     /// structures are unsafe.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// use std::cell::{UnsafeCell as TotallySafeCell};
     ///

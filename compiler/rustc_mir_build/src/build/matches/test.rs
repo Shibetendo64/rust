@@ -5,19 +5,21 @@
 // identify what tests are needed, perform the tests, and then filter
 // the candidates based on the result.
 
+use crate::build::expr::as_place::PlaceBuilder;
 use crate::build::matches::{Candidate, MatchPair, Test, TestKind};
 use crate::build::Builder;
 use crate::thir::pattern::compare_const_vals;
-use crate::thir::*;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_hir::{LangItem, RangeEnd};
 use rustc_index::bit_set::BitSet;
 use rustc_middle::mir::*;
+use rustc_middle::thir::*;
 use rustc_middle::ty::subst::{GenericArg, Subst};
 use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{self, adjustment::PointerCast, Ty, TyCtxt};
 use rustc_span::def_id::DefId;
 use rustc_span::symbol::{sym, Symbol};
+use rustc_span::Span;
 use rustc_target::abi::VariantIdx;
 
 use std::cmp::Ordering;
@@ -81,7 +83,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
     pub(super) fn add_cases_to_switch<'pat>(
         &mut self,
-        test_place: &Place<'tcx>,
+        test_place: &PlaceBuilder<'tcx>,
         candidate: &Candidate<'pat, 'tcx>,
         switch_ty: Ty<'tcx>,
         options: &mut FxIndexMap<&'tcx ty::Const<'tcx>, u128>,
@@ -123,7 +125,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
     pub(super) fn add_variants_to_switch<'pat>(
         &mut self,
-        test_place: &Place<'tcx>,
+        test_place: &PlaceBuilder<'tcx>,
         candidate: &Candidate<'pat, 'tcx>,
         variants: &mut BitSet<VariantIdx>,
     ) -> bool {
@@ -150,11 +152,21 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
     pub(super) fn perform_test(
         &mut self,
+        match_start_span: Span,
+        scrutinee_span: Span,
         block: BasicBlock,
-        place: Place<'tcx>,
+        place_builder: PlaceBuilder<'tcx>,
         test: &Test<'tcx>,
         make_target_blocks: impl FnOnce(&mut Self) -> Vec<BasicBlock>,
     ) {
+        let place: Place<'tcx>;
+        if let Ok(test_place_builder) =
+            place_builder.try_upvars_resolved(self.tcx, self.typeck_results)
+        {
+            place = test_place_builder.into_place(self.tcx, self.typeck_results);
+        } else {
+            return;
+        }
         debug!(
             "perform_test({:?}, {:?}: {:?}, {:?})",
             block,
@@ -197,10 +209,15 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 debug!("num_enum_variants: {}, variants: {:?}", num_enum_variants, variants);
                 let discr_ty = adt_def.repr.discr_type().to_ty(tcx);
                 let discr = self.temp(discr_ty, test.span);
-                self.cfg.push_assign(block, source_info, discr, Rvalue::Discriminant(place));
+                self.cfg.push_assign(
+                    block,
+                    self.source_info(scrutinee_span),
+                    discr,
+                    Rvalue::Discriminant(place),
+                );
                 self.cfg.terminate(
                     block,
-                    source_info,
+                    self.source_info(match_start_span),
                     TerminatorKind::SwitchInt {
                         discr: Operand::Move(discr),
                         switch_ty: discr_ty,
@@ -237,7 +254,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         targets: switch_targets,
                     }
                 };
-                self.cfg.terminate(block, source_info, terminator);
+                self.cfg.terminate(block, self.source_info(match_start_span), terminator);
             }
 
             TestKind::Eq { value, ty } => {
@@ -337,7 +354,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let result = self.temp(bool_ty, source_info.span);
 
         // result = op(left, right)
-        self.cfg.push_assign(block, source_info, result, Rvalue::BinaryOp(op, box (left, right)));
+        self.cfg.push_assign(
+            block,
+            source_info,
+            result,
+            Rvalue::BinaryOp(op, Box::new((left, right))),
+        );
 
         // branch based on result
         self.cfg.terminate(
@@ -420,7 +442,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             block,
             source_info,
             TerminatorKind::Call {
-                func: Operand::Constant(box Constant {
+                func: Operand::Constant(Box::new(Constant {
                     span: source_info.span,
 
                     // FIXME(#54571): This constant comes from user input (a
@@ -429,8 +451,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     // Need to experiment.
                     user_ty: None,
 
-                    literal: method,
-                }),
+                    literal: method.into(),
+                })),
                 args: vec![val, expect],
                 destination: Some((eq_result, eq_block)),
                 cleanup: None,
@@ -481,7 +503,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// tighter match code if we do something a bit different.
     pub(super) fn sort_candidate<'pat>(
         &mut self,
-        test_place: &Place<'tcx>,
+        test_place: &PlaceBuilder<'tcx>,
         test: &Test<'tcx>,
         candidate: &mut Candidate<'pat, 'tcx>,
     ) -> Option<usize> {
@@ -728,7 +750,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         candidate: &mut Candidate<'pat, 'tcx>,
     ) {
         let match_pair = candidate.match_pairs.remove(match_pair_index);
-        let tcx = self.tcx;
 
         // So, if we have a match-pattern like `x @ Enum::Variant(P1, P2)`,
         // we want to create a set of derived match-patterns like
@@ -737,10 +758,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             Some(adt_def.variants[variant_index].ident.name),
             variant_index,
         );
-        let downcast_place = tcx.mk_place_elem(match_pair.place, elem); // `(x as Variant)`
+        let downcast_place = match_pair.place.project(elem); // `(x as Variant)`
         let consequent_match_pairs = subpatterns.iter().map(|subpattern| {
             // e.g., `(x as Variant).0`
-            let place = tcx.mk_place_field(downcast_place, subpattern.field, subpattern.pattern.ty);
+            let place = downcast_place.clone().field(subpattern.field, subpattern.pattern.ty);
             // e.g., `(x as Variant).0 @ P1`
             MatchPair::new(place, &subpattern.pattern)
         });

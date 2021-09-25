@@ -1,4 +1,5 @@
-use crate::utils::{in_macro, span_lint_and_sugg};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::in_macro;
 use if_chain::if_chain;
 use rustc_ast::ast::{BindingMode, Lifetime, Mutability, Param, PatKind, Path, TyKind};
 use rustc_errors::Applicability;
@@ -8,13 +9,13 @@ use rustc_span::symbol::kw;
 use rustc_span::Span;
 
 declare_clippy_lint! {
-    /// **What it does:** The lint checks for `self` in fn parameters that
+    /// ### What it does
+    /// The lint checks for `self` in fn parameters that
     /// specify the `Self`-type explicitly
-    /// **Why is this bad?** Increases the amount and decreases the readability of code
+    /// ### Why is this bad?
+    /// Increases the amount and decreases the readability of code
     ///
-    /// **Known problems:** None
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// enum ValType {
     ///     I32,
@@ -120,7 +121,7 @@ impl EarlyLintPass for NeedlessArbitrarySelfType {
         match &p.ty.kind {
             TyKind::Path(None, path) => {
                 if let PatKind::Ident(BindingMode::ByValue(mutbl), _, _) = p.pat.kind {
-                    check_param_inner(cx, path, p.span.to(p.ty.span), &Mode::Value, mutbl)
+                    check_param_inner(cx, path, p.span.to(p.ty.span), &Mode::Value, mutbl);
                 }
             },
             TyKind::Rptr(lifetime, mut_ty) => {
@@ -128,7 +129,7 @@ impl EarlyLintPass for NeedlessArbitrarySelfType {
                 if let TyKind::Path(None, path) = &mut_ty.ty.kind;
                 if let PatKind::Ident(BindingMode::ByValue(Mutability::Not), _, _) = p.pat.kind;
                     then {
-                        check_param_inner(cx, path, p.span.to(p.ty.span), &Mode::Ref(*lifetime), mut_ty.mutbl)
+                        check_param_inner(cx, path, p.span.to(p.ty.span), &Mode::Ref(*lifetime), mut_ty.mutbl);
                     }
                 }
             },

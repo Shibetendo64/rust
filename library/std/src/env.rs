@@ -61,6 +61,7 @@ pub fn current_dir() -> io::Result<PathBuf> {
 /// assert!(env::set_current_dir(&root).is_ok());
 /// println!("Successfully changed working directory to {}!", root.display());
 /// ```
+#[doc(alias = "chdir")]
 #[stable(feature = "env", since = "1.0.0")]
 pub fn set_current_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     os_imp::chdir(path.as_ref())
@@ -124,6 +125,10 @@ pub fn vars() -> Vars {
 /// variables at the time of this invocation. Modifications to environment
 /// variables afterwards will not be reflected in the returned iterator.
 ///
+/// Note that the returned iterator will not check if the environment variables
+/// are valid Unicode. If you want to panic on invalid UTF-8,
+/// use the [`vars`] function instead.
+///
 /// # Examples
 ///
 /// ```
@@ -154,7 +159,7 @@ impl Iterator for Vars {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Vars {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Vars { .. }")
+        f.debug_struct("Vars").finish_non_exhaustive()
     }
 }
 
@@ -172,7 +177,7 @@ impl Iterator for VarsOs {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for VarsOs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("VarsOs { .. }")
+        f.debug_struct("VarOs").finish_non_exhaustive()
     }
 }
 
@@ -180,14 +185,13 @@ impl fmt::Debug for VarsOs {
 ///
 /// # Errors
 ///
-/// * Environment variable is not present
-/// * Environment variable is not valid unicode
+/// This function will return an error if the environment variable isn't set.
 ///
-/// # Panics
+/// This function may return an error if the environment variable's name contains
+/// the equal sign character (`=`) or the NUL character.
 ///
-/// This function may panic if `key` is empty, contains an ASCII equals sign
-/// `'='` or the NUL character `'\0'`, or when the value contains the NUL
-/// character.
+/// This function will return an error if the environment variable's value is
+/// not valid Unicode. If this is not desired, consider using [`var_os`].
 ///
 /// # Examples
 ///
@@ -213,13 +217,21 @@ fn _var(key: &OsStr) -> Result<String, VarError> {
 }
 
 /// Fetches the environment variable `key` from the current process, returning
-/// [`None`] if the variable isn't set.
+/// [`None`] if the variable isn't set or there's another error.
 ///
-/// # Panics
+/// Note that the method will not check if the environment variable
+/// is valid Unicode. If you want to have an error on invalid UTF-8,
+/// use the [`var`] function instead.
 ///
-/// This function may panic if `key` is empty, contains an ASCII equals sign
-/// `'='` or the NUL character `'\0'`, or when the value contains the NUL
-/// character.
+/// # Errors
+///
+/// This function returns an error if the environment variable isn't set.
+///
+/// This function may return an error if the environment variable's name contains
+/// the equal sign character (`=`) or the NUL character.
+///
+/// This function may return an error if the environment variable's value contains
+/// the NUL character.
 ///
 /// # Examples
 ///
@@ -239,7 +251,6 @@ pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
 
 fn _var_os(key: &OsStr) -> Option<OsString> {
     os_imp::getenv(key)
-        .unwrap_or_else(|e| panic!("failed to get environment variable `{:?}`: {}", key, e))
 }
 
 /// The error type for operations interacting with environment variables.
@@ -284,7 +295,7 @@ impl Error for VarError {
     }
 }
 
-/// Sets the environment variable `k` to the value `v` for the currently running
+/// Sets the environment variable `key` to the value `value` for the currently running
 /// process.
 ///
 /// Note that while concurrent access to environment variables is safe in Rust,
@@ -295,14 +306,13 @@ impl Error for VarError {
 ///
 /// Discussion of this unsafety on Unix may be found in:
 ///
-///  - [Austin Group Bugzilla](http://austingroupbugs.net/view.php?id=188)
+///  - [Austin Group Bugzilla](https://austingroupbugs.net/view.php?id=188)
 ///  - [GNU C library Bugzilla](https://sourceware.org/bugzilla/show_bug.cgi?id=15607#c2)
 ///
 /// # Panics
 ///
-/// This function may panic if `key` is empty, contains an ASCII equals sign
-/// `'='` or the NUL character `'\0'`, or when the value contains the NUL
-/// character.
+/// This function may panic if `key` is empty, contains an ASCII equals sign `'='`
+/// or the NUL character `'\0'`, or when `value` contains the NUL character.
 ///
 /// # Examples
 ///
@@ -314,13 +324,13 @@ impl Error for VarError {
 /// assert_eq!(env::var(key), Ok("VALUE".to_string()));
 /// ```
 #[stable(feature = "env", since = "1.0.0")]
-pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(k: K, v: V) {
-    _set_var(k.as_ref(), v.as_ref())
+pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
+    _set_var(key.as_ref(), value.as_ref())
 }
 
-fn _set_var(k: &OsStr, v: &OsStr) {
-    os_imp::setenv(k, v).unwrap_or_else(|e| {
-        panic!("failed to set environment variable `{:?}` to `{:?}`: {}", k, v, e)
+fn _set_var(key: &OsStr, value: &OsStr) {
+    os_imp::setenv(key, value).unwrap_or_else(|e| {
+        panic!("failed to set environment variable `{:?}` to `{:?}`: {}", key, value, e)
     })
 }
 
@@ -334,7 +344,7 @@ fn _set_var(k: &OsStr, v: &OsStr) {
 ///
 /// Discussion of this unsafety on Unix may be found in:
 ///
-///  - [Austin Group Bugzilla](http://austingroupbugs.net/view.php?id=188)
+///  - [Austin Group Bugzilla](https://austingroupbugs.net/view.php?id=188)
 ///  - [GNU C library Bugzilla](https://sourceware.org/bugzilla/show_bug.cgi?id=15607#c2)
 ///
 /// # Panics
@@ -356,13 +366,13 @@ fn _set_var(k: &OsStr, v: &OsStr) {
 /// assert!(env::var(key).is_err());
 /// ```
 #[stable(feature = "env", since = "1.0.0")]
-pub fn remove_var<K: AsRef<OsStr>>(k: K) {
-    _remove_var(k.as_ref())
+pub fn remove_var<K: AsRef<OsStr>>(key: K) {
+    _remove_var(key.as_ref())
 }
 
-fn _remove_var(k: &OsStr) {
-    os_imp::unsetenv(k)
-        .unwrap_or_else(|e| panic!("failed to remove environment variable `{:?}`: {}", k, e))
+fn _remove_var(key: &OsStr) {
+    os_imp::unsetenv(key)
+        .unwrap_or_else(|e| panic!("failed to remove environment variable `{:?}`: {}", key, e))
 }
 
 /// An iterator that splits an environment variable into paths according to
@@ -419,7 +429,7 @@ impl<'a> Iterator for SplitPaths<'a> {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for SplitPaths<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("SplitPaths { .. }")
+        f.debug_struct("SplitPaths").finish_non_exhaustive()
     }
 }
 
@@ -606,6 +616,9 @@ pub fn temp_dir() -> PathBuf {
 /// return the path of the symbolic link and other platforms will return the
 /// path of the symbolic link’s target.
 ///
+/// If the executable is renamed while it is running, platforms may return the
+/// path at the time it was loaded instead of the new path.
+///
 /// # Errors
 ///
 /// Acquiring the path of the current executable is a platform-specific operation
@@ -673,7 +686,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
 /// for more.
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and may not even exist. This means this property
+/// set to arbitrary text, and might not even exist. This means this property
 /// should not be relied upon for security purposes.
 ///
 /// [`env::args()`]: args
@@ -689,7 +702,7 @@ pub struct Args {
 /// for more.
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and may not even exist. This means this property
+/// set to arbitrary text, and might not even exist. This means this property
 /// should not be relied upon for security purposes.
 ///
 /// [`env::args_os()`]: args_os
@@ -702,7 +715,7 @@ pub struct ArgsOs {
 /// via the command line).
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and may not even exist. This means this property should
+/// set to arbitrary text, and might not even exist. This means this property should
 /// not be relied upon for security purposes.
 ///
 /// On Unix systems the shell usually expands unquoted arguments with glob patterns
@@ -710,14 +723,14 @@ pub struct ArgsOs {
 /// passed as-is.
 ///
 /// On glibc Linux systems, arguments are retrieved by placing a function in `.init_array`.
-/// Glibc passes `argc`, `argv`, and `envp` to functions in `.init_array`, as a non-standard
+/// glibc passes `argc`, `argv`, and `envp` to functions in `.init_array`, as a non-standard
 /// extension. This allows `std::env::args` to work even in a `cdylib` or `staticlib`, as it
 /// does on macOS and Windows.
 ///
 /// # Panics
 ///
 /// The returned iterator will panic during iteration if any argument to the
-/// process is not valid unicode. If this is not desired,
+/// process is not valid Unicode. If this is not desired,
 /// use the [`args_os`] function instead.
 ///
 /// # Examples
@@ -735,17 +748,25 @@ pub fn args() -> Args {
     Args { inner: args_os() }
 }
 
-/// Returns the arguments which this program was started with (normally passed
+/// Returns the arguments that this program was started with (normally passed
 /// via the command line).
 ///
 /// The first element is traditionally the path of the executable, but it can be
-/// set to arbitrary text, and it may not even exist, so this property should
+/// set to arbitrary text, and might not even exist. This means this property should
 /// not be relied upon for security purposes.
 ///
-/// On glibc Linux systems, arguments are retrieved by placing a function in ".init_array".
-/// Glibc passes argc, argv, and envp to functions in ".init_array", as a non-standard extension.
-/// This allows `std::env::args` to work even in a `cdylib` or `staticlib`, as it does on macOS
-/// and Windows.
+/// On Unix systems the shell usually expands unquoted arguments with glob patterns
+/// (such as `*` and `?`). On Windows this is not done, and such arguments are
+/// passed as-is.
+///
+/// On glibc Linux systems, arguments are retrieved by placing a function in `.init_array`.
+/// glibc passes `argc`, `argv`, and `envp` to functions in `.init_array`, as a non-standard
+/// extension. This allows `std::env::args_os` to work even in a `cdylib` or `staticlib`, as it
+/// does on macOS and Windows.
+///
+/// Note that the returned iterator will not check if the arguments to the
+/// process are valid Unicode. If you want to panic on invalid UTF-8,
+/// use the [`args`] function instead.
 ///
 /// # Examples
 ///
@@ -799,7 +820,7 @@ impl DoubleEndedIterator for Args {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Args {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Args").field("inner", &self.inner.inner.inner_debug()).finish()
+        f.debug_struct("Args").field("inner", &self.inner.inner).finish()
     }
 }
 
@@ -840,7 +861,7 @@ impl DoubleEndedIterator for ArgsOs {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for ArgsOs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ArgsOs").field("inner", &self.inner.inner_debug()).finish()
+        f.debug_struct("ArgsOs").field("inner", &self.inner).finish()
     }
 }
 
@@ -858,6 +879,7 @@ pub mod consts {
     /// - x86_64
     /// - arm
     /// - aarch64
+    /// - m68k
     /// - mips
     /// - mips64
     /// - powerpc

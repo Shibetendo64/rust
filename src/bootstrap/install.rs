@@ -17,6 +17,11 @@ use crate::Compiler;
 use crate::builder::{Builder, RunConfig, ShouldRun, Step};
 use crate::config::{Config, TargetSelection};
 
+#[cfg(target_os = "illumos")]
+const SHELL: &str = "bash";
+#[cfg(not(target_os = "illumos"))]
+const SHELL: &str = "sh";
+
 fn install_sh(
     builder: &Builder<'_>,
     package: &str,
@@ -37,7 +42,7 @@ fn install_sh(
     let empty_dir = builder.out.join("tmp/empty_dir");
     t!(fs::create_dir_all(&empty_dir));
 
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new(SHELL);
     cmd.current_dir(&empty_dir)
         .arg(sanitize_sh(&tarball.decompressed_output().join("install.sh")))
         .arg(format!("--prefix={}", prepare_dir(prefix)))
@@ -139,6 +144,8 @@ install!((self, builder, _config),
     };
     Std, "library/std", true, only_hosts: false, {
         for target in &builder.targets {
+            // `expect` should be safe, only None when host != build, but this
+            // only runs when host == build
             let tarball = builder.ensure(dist::Std {
                 compiler: self.compiler,
                 target: *target
@@ -147,7 +154,9 @@ install!((self, builder, _config),
         }
     };
     Cargo, "cargo", Self::should_build(_config), only_hosts: true, {
-        let tarball = builder.ensure(dist::Cargo { compiler: self.compiler, target: self.target });
+        let tarball = builder
+            .ensure(dist::Cargo { compiler: self.compiler, target: self.target })
+            .expect("missing cargo");
         install_sh(builder, "cargo", self.compiler.stage, Some(self.target), &tarball);
     };
     Rls, "rls", Self::should_build(_config), only_hosts: true, {
@@ -160,13 +169,20 @@ install!((self, builder, _config),
         }
     };
     RustAnalyzer, "rust-analyzer", Self::should_build(_config), only_hosts: true, {
-        let tarball = builder
-            .ensure(dist::RustAnalyzer { compiler: self.compiler, target: self.target })
-            .expect("missing rust-analyzer");
-        install_sh(builder, "rust-analyzer", self.compiler.stage, Some(self.target), &tarball);
+        if let Some(tarball) =
+            builder.ensure(dist::RustAnalyzer { compiler: self.compiler, target: self.target })
+        {
+            install_sh(builder, "rust-analyzer", self.compiler.stage, Some(self.target), &tarball);
+        } else {
+            builder.info(
+                &format!("skipping Install rust-analyzer stage{} ({})", self.compiler.stage, self.target),
+            );
+        }
     };
     Clippy, "clippy", Self::should_build(_config), only_hosts: true, {
-        let tarball = builder.ensure(dist::Clippy { compiler: self.compiler, target: self.target });
+        let tarball = builder
+            .ensure(dist::Clippy { compiler: self.compiler, target: self.target })
+            .expect("missing clippy");
         install_sh(builder, "clippy", self.compiler.stage, Some(self.target), &tarball);
     };
     Miri, "miri", Self::should_build(_config), only_hosts: true, {
@@ -190,7 +206,25 @@ install!((self, builder, _config),
             );
         }
     };
+    RustDemangler, "rust-demangler", Self::should_build(_config), only_hosts: true, {
+        // Note: Even though `should_build` may return true for `extended` default tools,
+        // dist::RustDemangler may still return None, unless the target-dependent `profiler` config
+        // is also true, or the `tools` array explicitly includes "rust-demangler".
+        if let Some(tarball) = builder.ensure(dist::RustDemangler {
+            compiler: self.compiler,
+            target: self.target
+        }) {
+            install_sh(builder, "rust-demangler", self.compiler.stage, Some(self.target), &tarball);
+        } else {
+            builder.info(
+                &format!("skipping Install RustDemangler stage{} ({})",
+                         self.compiler.stage, self.target),
+            );
+        }
+    };
     Analysis, "analysis", Self::should_build(_config), only_hosts: false, {
+        // `expect` should be safe, only None with host != build, but this
+        // only uses the `build` compiler
         let tarball = builder.ensure(dist::Analysis {
             // Find the actual compiler (handling the full bootstrap option) which
             // produced the save-analysis data because that data isn't copied

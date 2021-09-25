@@ -76,6 +76,7 @@ fn main() {
         "aarch64",
         "amdgpu",
         "avr",
+        "m68k",
         "mips",
         "powerpc",
         "systemz",
@@ -86,17 +87,8 @@ fn main() {
         "nvptx",
         "hexagon",
         "riscv",
+        "bpf",
     ];
-
-    let mut version_cmd = Command::new(&llvm_config);
-    version_cmd.arg("--version");
-    let version_output = output(&mut version_cmd);
-    let mut parts = version_output.split('.').take(2).filter_map(|s| s.parse::<u32>().ok());
-    let (major, _minor) = if let (Some(major), Some(minor)) = (parts.next(), parts.next()) {
-        (major, minor)
-    } else {
-        (8, 0)
-    };
 
     let required_components = &[
         "ipo",
@@ -121,10 +113,6 @@ fn main() {
 
     for component in components.iter() {
         println!("cargo:rustc-cfg=llvm_component=\"{}\"", component);
-    }
-
-    if major >= 9 {
-        println!("cargo:rustc-cfg=llvm_has_msp430_asm_parser");
     }
 
     // Link in our own LLVM shims, compiled with the same flags as LLVM
@@ -195,7 +183,7 @@ fn main() {
     } else if target.contains("windows-gnu") {
         println!("cargo:rustc-link-lib=shell32");
         println!("cargo:rustc-link-lib=uuid");
-    } else if target.contains("netbsd") || target.contains("haiku") {
+    } else if target.contains("netbsd") || target.contains("haiku") || target.contains("darwin") {
         println!("cargo:rustc-link-lib=z");
     }
     cmd.args(&components);

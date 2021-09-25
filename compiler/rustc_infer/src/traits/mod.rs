@@ -28,7 +28,7 @@ pub use self::project::{
 pub use rustc_middle::traits::*;
 
 /// An `Obligation` represents some trait reference (e.g., `i32: Eq`) for
-/// which the "impl_source" must be found. The process of finding a "impl_source" is
+/// which the "impl_source" must be found. The process of finding an "impl_source" is
 /// called "resolving" the `Obligation`. This process consists of
 /// either identifying an `impl` (e.g., `impl Eq for i32`) that
 /// satisfies the obligation, or else finding a bound that is in
@@ -66,10 +66,10 @@ pub type Selection<'tcx> = ImplSource<'tcx, PredicateObligation<'tcx>>;
 pub struct FulfillmentError<'tcx> {
     pub obligation: PredicateObligation<'tcx>,
     pub code: FulfillmentErrorCode<'tcx>,
-    /// Diagnostics only: we opportunistically change the `code.span` when we encounter an
-    /// obligation error caused by a call argument. When this is the case, we also signal that in
-    /// this field to ensure accuracy of suggestions.
-    pub points_at_arg_span: bool,
+    /// Diagnostics only: the 'root' obligation which resulted in
+    /// the failure to process `obligation`. This is the obligation
+    /// that was initially passed to `register_predicate_obligation`
+    pub root_obligation: PredicateObligation<'tcx>,
 }
 
 #[derive(Clone)]
@@ -122,13 +122,14 @@ impl<'tcx> FulfillmentError<'tcx> {
     pub fn new(
         obligation: PredicateObligation<'tcx>,
         code: FulfillmentErrorCode<'tcx>,
+        root_obligation: PredicateObligation<'tcx>,
     ) -> FulfillmentError<'tcx> {
-        FulfillmentError { obligation, code, points_at_arg_span: false }
+        FulfillmentError { obligation, code, root_obligation }
     }
 }
 
 impl<'tcx> TraitObligation<'tcx> {
-    pub fn self_ty(&self) -> ty::Binder<Ty<'tcx>> {
+    pub fn self_ty(&self) -> ty::Binder<'tcx, Ty<'tcx>> {
         self.predicate.map_bound(|p| p.self_ty())
     }
 }

@@ -1,4 +1,6 @@
-use crate::utils::{match_def_path, snippet_with_applicability, span_lint_and_sugg};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::match_def_path;
+use clippy_utils::source::snippet_with_applicability;
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
@@ -7,12 +9,14 @@ use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `.to_digit(..).is_some()` on `char`s.
+    /// ### What it does
+    /// Checks for `.to_digit(..).is_some()` on `char`s.
     ///
-    /// **Why is this bad?** This is a convoluted way of checking if a `char` is a digit. It's
+    /// ### Why is this bad?
+    /// This is a convoluted way of checking if a `char` is a digit. It's
     /// more straight forward to use the dedicated `is_digit` method.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let c = 'c';
     /// # let radix = 10;

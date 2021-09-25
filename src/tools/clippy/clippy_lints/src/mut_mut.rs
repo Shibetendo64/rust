@@ -1,4 +1,5 @@
-use crate::utils::{higher, span_lint};
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::higher;
 use rustc_hir as hir;
 use rustc_hir::intravisit;
 use rustc_lint::{LateContext, LateLintPass, LintContext};
@@ -8,15 +9,15 @@ use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for instances of `mut mut` references.
+    /// ### What it does
+    /// Checks for instances of `mut mut` references.
     ///
-    /// **Why is this bad?** Multiple `mut`s don't add anything meaningful to the
+    /// ### Why is this bad?
+    /// Multiple `mut`s don't add anything meaningful to the
     /// source. This is either a copy'n'paste error, or it shows a fundamental
     /// misunderstanding of references.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let mut y = 1;
     /// let x = &mut &mut y;
@@ -52,7 +53,7 @@ impl<'a, 'tcx> intravisit::Visitor<'tcx> for MutVisitor<'a, 'tcx> {
             return;
         }
 
-        if let Some((_, arg, body, _)) = higher::for_loop(expr) {
+        if let Some(higher::ForLoop { arg, body, .. }) = higher::ForLoop::hir(expr) {
             // A `for` loop lowers to:
             // ```rust
             // match ::std::iter::Iterator::next(&mut iter) {
@@ -61,7 +62,7 @@ impl<'a, 'tcx> intravisit::Visitor<'tcx> for MutVisitor<'a, 'tcx> {
             // Let's ignore the generated code.
             intravisit::walk_expr(self, arg);
             intravisit::walk_expr(self, body);
-        } else if let hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Mut, ref e) = expr.kind {
+        } else if let hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Mut, e) = expr.kind {
             if let hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Mut, _) = e.kind {
                 span_lint(
                     self.cx,
@@ -84,7 +85,7 @@ impl<'a, 'tcx> intravisit::Visitor<'tcx> for MutVisitor<'a, 'tcx> {
         if let hir::TyKind::Rptr(
             _,
             hir::MutTy {
-                ty: ref pty,
+                ty: pty,
                 mutbl: hir::Mutability::Mut,
             },
         ) = ty.kind

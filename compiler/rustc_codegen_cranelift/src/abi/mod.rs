@@ -1,22 +1,20 @@
 //! Handling of everything related to the calling convention. Also fills `fx.local_map`.
 
-#[cfg(debug_assertions)]
 mod comments;
 mod pass_mode;
 mod returning;
 
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::ty::layout::FnAbiExt;
+use rustc_middle::ty::layout::FnAbiOf;
 use rustc_target::abi::call::{Conv, FnAbi};
 use rustc_target::spec::abi::Abi;
 
-use cranelift_codegen::ir::AbiParam;
-use smallvec::smallvec;
+use cranelift_codegen::ir::{AbiParam, SigRef};
 
 use self::pass_mode::*;
 use crate::prelude::*;
 
-pub(crate) use self::returning::{can_return_to_ssa_var, codegen_return};
+pub(crate) use self::returning::codegen_return;
 
 fn clif_sig_from_fn_abi<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -55,7 +53,11 @@ pub(crate) fn get_function_sig<'tcx>(
     inst: Instance<'tcx>,
 ) -> Signature {
     assert!(!inst.substs.needs_infer());
-    clif_sig_from_fn_abi(tcx, triple, &FnAbi::of_instance(&RevealAllLayoutCx(tcx), inst, &[]))
+    clif_sig_from_fn_abi(
+        tcx,
+        triple,
+        &RevealAllLayoutCx(tcx).fn_abi_of_instance(inst, ty::List::empty()),
+    )
 }
 
 /// Instance must be monomorphized
@@ -64,19 +66,20 @@ pub(crate) fn import_function<'tcx>(
     module: &mut dyn Module,
     inst: Instance<'tcx>,
 ) -> FuncId {
-    let name = tcx.symbol_name(inst).name.to_string();
+    let name = tcx.symbol_name(inst).name;
     let sig = get_function_sig(tcx, module.isa().triple(), inst);
-    module.declare_function(&name, Linkage::Import, &sig).unwrap()
+    module.declare_function(name, Linkage::Import, &sig).unwrap()
 }
 
 impl<'tcx> FunctionCx<'_, '_, 'tcx> {
     /// Instance must be monomorphized
     pub(crate) fn get_function_ref(&mut self, inst: Instance<'tcx>) -> FuncRef {
-        let func_id = import_function(self.tcx, self.cx.module, inst);
-        let func_ref = self.cx.module.declare_func_in_func(func_id, &mut self.bcx.func);
+        let func_id = import_function(self.tcx, self.module, inst);
+        let func_ref = self.module.declare_func_in_func(func_id, &mut self.bcx.func);
 
-        #[cfg(debug_assertions)]
-        self.add_comment(func_ref, format!("{:?}", inst));
+        if self.clif_comments.enabled() {
+            self.add_comment(func_ref, format!("{:?}", inst));
+        }
 
         func_ref
     }
@@ -89,11 +92,10 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
         args: &[Value],
     ) -> &[Value] {
         let sig = Signature { params, returns, call_conv: CallConv::triple_default(self.triple()) };
-        let func_id = self.cx.module.declare_function(&name, Linkage::Import, &sig).unwrap();
-        let func_ref = self.cx.module.declare_func_in_func(func_id, &mut self.bcx.func);
+        let func_id = self.module.declare_function(name, Linkage::Import, &sig).unwrap();
+        let func_ref = self.module.declare_func_in_func(func_id, &mut self.bcx.func);
         let call_inst = self.bcx.ins().call(func_ref, args);
-        #[cfg(debug_assertions)]
-        {
+        if self.clif_comments.enabled() {
             self.add_comment(call_inst, format!("easy_call {}", name));
         }
         let results = self.bcx.inst_results(call_inst);
@@ -149,7 +151,6 @@ fn make_local_place<'tcx>(
         CPlace::new_stack_slot(fx, layout)
     };
 
-    #[cfg(debug_assertions)]
     self::comments::add_local_place_comments(fx, place, local);
 
     place
@@ -163,7 +164,6 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
 
     let ssa_analyzed = crate::analyze::analyze(fx);
 
-    #[cfg(debug_assertions)]
     self::comments::add_args_header_comment(fx);
 
     let mut block_params_iter = fx.bcx.func.dfg.block_params(start_block).to_vec().into_iter();
@@ -228,7 +228,6 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
     fx.fn_abi = Some(fn_abi);
     assert!(block_params_iter.next().is_none(), "arg_value left behind");
 
-    #[cfg(debug_assertions)]
     self::comments::add_locals_header_comment(fx);
 
     for (local, arg_kind, ty) in func_params {
@@ -240,28 +239,20 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
         // not mutated by the current function, this is necessary to support unsized arguments.
         if let ArgKind::Normal(Some(val)) = arg_kind {
             if let Some((addr, meta)) = val.try_to_ptr() {
-                let local_decl = &fx.mir.local_decls[local];
-                //                       v this ! is important
-                let internally_mutable = !val
-                    .layout()
-                    .ty
-                    .is_freeze(fx.tcx.at(local_decl.source_info.span), ParamEnv::reveal_all());
-                if local_decl.mutability == mir::Mutability::Not && !internally_mutable {
-                    // We wont mutate this argument, so it is fine to borrow the backing storage
-                    // of this argument, to prevent a copy.
+                // Ownership of the value at the backing storage for an argument is passed to the
+                // callee per the ABI, so it is fine to borrow the backing storage of this argument
+                // to prevent a copy.
 
-                    let place = if let Some(meta) = meta {
-                        CPlace::for_ptr_with_extra(addr, meta, val.layout())
-                    } else {
-                        CPlace::for_ptr(addr, val.layout())
-                    };
+                let place = if let Some(meta) = meta {
+                    CPlace::for_ptr_with_extra(addr, meta, val.layout())
+                } else {
+                    CPlace::for_ptr(addr, val.layout())
+                };
 
-                    #[cfg(debug_assertions)]
-                    self::comments::add_local_place_comments(fx, place, local);
+                self::comments::add_local_place_comments(fx, place, local);
 
-                    assert_eq!(fx.local_map.push(place), local);
-                    continue;
-                }
+                assert_eq!(fx.local_map.push(place), local);
+                continue;
             }
         }
 
@@ -297,10 +288,25 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
     fx.bcx.ins().jump(*fx.block_map.get(START_BLOCK).unwrap(), &[]);
 }
 
+struct CallArgument<'tcx> {
+    value: CValue<'tcx>,
+    is_owned: bool,
+}
+
+// FIXME avoid intermediate `CValue` before calling `adjust_arg_for_abi`
+fn codegen_call_argument_operand<'tcx>(
+    fx: &mut FunctionCx<'_, '_, 'tcx>,
+    operand: &Operand<'tcx>,
+) -> CallArgument<'tcx> {
+    CallArgument {
+        value: codegen_operand(fx, operand),
+        is_owned: matches!(operand, Operand::Move(_)),
+    }
+}
+
 pub(crate) fn codegen_terminator_call<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
     span: Span,
-    current_block: Block,
     func: &Operand<'tcx>,
     args: &[Operand<'tcx>],
     destination: Option<(Place<'tcx>, BasicBlock)>,
@@ -348,30 +354,29 @@ pub(crate) fn codegen_terminator_call<'tcx>(
     };
 
     let extra_args = &args[fn_sig.inputs().len()..];
-    let extra_args = extra_args
-        .iter()
-        .map(|op_arg| fx.monomorphize(op_arg.ty(fx.mir, fx.tcx)))
-        .collect::<Vec<_>>();
+    let extra_args = fx
+        .tcx
+        .mk_type_list(extra_args.iter().map(|op_arg| fx.monomorphize(op_arg.ty(fx.mir, fx.tcx))));
     let fn_abi = if let Some(instance) = instance {
-        FnAbi::of_instance(&RevealAllLayoutCx(fx.tcx), instance, &extra_args)
+        RevealAllLayoutCx(fx.tcx).fn_abi_of_instance(instance, extra_args)
     } else {
-        FnAbi::of_fn_ptr(&RevealAllLayoutCx(fx.tcx), fn_ty.fn_sig(fx.tcx), &extra_args)
+        RevealAllLayoutCx(fx.tcx).fn_abi_of_fn_ptr(fn_ty.fn_sig(fx.tcx), extra_args)
     };
 
     let is_cold = instance
         .map(|inst| fx.tcx.codegen_fn_attrs(inst.def_id()).flags.contains(CodegenFnAttrFlags::COLD))
         .unwrap_or(false);
     if is_cold {
-        fx.cold_blocks.insert(current_block);
+        // FIXME Mark current_block block as cold once Cranelift supports it
     }
 
     // Unpack arguments tuple for closures
-    let args = if fn_sig.abi == Abi::RustCall {
+    let mut args = if fn_sig.abi == Abi::RustCall {
         assert_eq!(args.len(), 2, "rust-call abi requires two arguments");
-        let self_arg = codegen_operand(fx, &args[0]);
-        let pack_arg = codegen_operand(fx, &args[1]);
+        let self_arg = codegen_call_argument_operand(fx, &args[0]);
+        let pack_arg = codegen_call_argument_operand(fx, &args[1]);
 
-        let tupled_arguments = match pack_arg.layout().ty.kind() {
+        let tupled_arguments = match pack_arg.value.layout().ty.kind() {
             ty::Tuple(ref tupled_arguments) => tupled_arguments,
             _ => bug!("argument to function with \"rust-call\" ABI is not a tuple"),
         };
@@ -379,123 +384,118 @@ pub(crate) fn codegen_terminator_call<'tcx>(
         let mut args = Vec::with_capacity(1 + tupled_arguments.len());
         args.push(self_arg);
         for i in 0..tupled_arguments.len() {
-            args.push(pack_arg.value_field(fx, mir::Field::new(i)));
+            args.push(CallArgument {
+                value: pack_arg.value.value_field(fx, mir::Field::new(i)),
+                is_owned: pack_arg.is_owned,
+            });
         }
         args
     } else {
-        args.iter().map(|arg| codegen_operand(fx, arg)).collect::<Vec<_>>()
+        args.iter().map(|arg| codegen_call_argument_operand(fx, arg)).collect::<Vec<_>>()
     };
 
-    //   | indirect call target
-    //   |         | the first argument to be passed
-    //   v         v
-    let (func_ref, first_arg) = match instance {
+    // Pass the caller location for `#[track_caller]`.
+    if instance.map(|inst| inst.def.requires_caller_location(fx.tcx)).unwrap_or(false) {
+        let caller_location = fx.get_caller_location(span);
+        args.push(CallArgument { value: caller_location, is_owned: false });
+    }
+
+    let args = args;
+    assert_eq!(fn_abi.args.len(), args.len());
+
+    enum CallTarget {
+        Direct(FuncRef),
+        Indirect(SigRef, Value),
+    }
+
+    let (func_ref, first_arg_override) = match instance {
         // Trait object call
         Some(Instance { def: InstanceDef::Virtual(_, idx), .. }) => {
-            #[cfg(debug_assertions)]
-            {
+            if fx.clif_comments.enabled() {
                 let nop_inst = fx.bcx.ins().nop();
                 fx.add_comment(
                     nop_inst,
-                    format!("virtual call; self arg pass mode: {:?}", &fn_abi.args[0],),
+                    format!("virtual call; self arg pass mode: {:?}", &fn_abi.args[0]),
                 );
             }
-            let (ptr, method) = crate::vtable::get_ptr_and_method_ref(fx, args[0], idx);
-            (Some(method), smallvec![ptr])
+
+            let (ptr, method) = crate::vtable::get_ptr_and_method_ref(fx, args[0].value, idx);
+            let sig = clif_sig_from_fn_abi(fx.tcx, fx.triple(), &fn_abi);
+            let sig = fx.bcx.import_signature(sig);
+
+            (CallTarget::Indirect(sig, method), Some(ptr))
         }
 
         // Normal call
-        Some(_) => (
-            None,
-            args.get(0)
-                .map(|arg| adjust_arg_for_abi(fx, *arg, &fn_abi.args[0]))
-                .unwrap_or(smallvec![]),
-        ),
+        Some(instance) => {
+            let func_ref = fx.get_function_ref(instance);
+            (CallTarget::Direct(func_ref), None)
+        }
 
         // Indirect call
         None => {
-            #[cfg(debug_assertions)]
-            {
+            if fx.clif_comments.enabled() {
                 let nop_inst = fx.bcx.ins().nop();
                 fx.add_comment(nop_inst, "indirect call");
             }
+
             let func = codegen_operand(fx, func).load_scalar(fx);
-            (
-                Some(func),
-                args.get(0)
-                    .map(|arg| adjust_arg_for_abi(fx, *arg, &fn_abi.args[0]))
-                    .unwrap_or(smallvec![]),
-            )
+            let sig = clif_sig_from_fn_abi(fx.tcx, fx.triple(), &fn_abi);
+            let sig = fx.bcx.import_signature(sig);
+
+            (CallTarget::Indirect(sig, func), None)
         }
     };
 
     let ret_place = destination.map(|(place, _)| place);
-    let (call_inst, call_args) = self::returning::codegen_with_call_return_arg(
-        fx,
-        &fn_abi.ret,
-        ret_place,
-        |fx, return_ptr| {
-            let regular_args_count = args.len();
-            let mut call_args: Vec<Value> = return_ptr
-                .into_iter()
-                .chain(first_arg.into_iter())
-                .chain(
-                    args.into_iter()
-                        .enumerate()
-                        .skip(1)
-                        .map(|(i, arg)| adjust_arg_for_abi(fx, arg, &fn_abi.args[i]).into_iter())
-                        .flatten(),
-                )
-                .collect::<Vec<_>>();
-
-            if instance.map(|inst| inst.def.requires_caller_location(fx.tcx)).unwrap_or(false) {
-                // Pass the caller location for `#[track_caller]`.
-                let caller_location = fx.get_caller_location(span);
-                call_args.extend(
-                    adjust_arg_for_abi(fx, caller_location, &fn_abi.args[regular_args_count])
-                        .into_iter(),
-                );
-                assert_eq!(fn_abi.args.len(), regular_args_count + 1);
-            } else {
-                assert_eq!(fn_abi.args.len(), regular_args_count);
-            }
-
-            let call_inst = if let Some(func_ref) = func_ref {
-                let sig = clif_sig_from_fn_abi(fx.tcx, fx.triple(), &fn_abi);
-                let sig = fx.bcx.import_signature(sig);
-                fx.bcx.ins().call_indirect(sig, func_ref, &call_args)
-            } else {
-                let func_ref =
-                    fx.get_function_ref(instance.expect("non-indirect call on non-FnDef type"));
-                fx.bcx.ins().call(func_ref, &call_args)
-            };
-
-            (call_inst, call_args)
-        },
-    );
-
-    // FIXME find a cleaner way to support varargs
-    if fn_sig.c_variadic {
-        if !matches!(fn_sig.abi, Abi::C { .. }) {
-            fx.tcx.sess.span_fatal(
-                span,
-                &format!("Variadic call for non-C abi {:?}", fn_sig.abi),
-            );
-        }
-        let sig_ref = fx.bcx.func.dfg.call_signature(call_inst).unwrap();
-        let abi_params = call_args
+    self::returning::codegen_with_call_return_arg(fx, &fn_abi.ret, ret_place, |fx, return_ptr| {
+        let call_args = return_ptr
             .into_iter()
-            .map(|arg| {
-                let ty = fx.bcx.func.dfg.value_type(arg);
-                if !ty.is_int() {
-                    // FIXME set %al to upperbound on float args once floats are supported
-                    fx.tcx.sess.span_fatal(span, &format!("Non int ty {:?} for variadic call", ty));
-                }
-                AbiParam::new(ty)
-            })
-            .collect::<Vec<AbiParam>>();
-        fx.bcx.func.dfg.signatures[sig_ref].params = abi_params;
-    }
+            .chain(first_arg_override.into_iter())
+            .chain(
+                args.into_iter()
+                    .enumerate()
+                    .skip(if first_arg_override.is_some() { 1 } else { 0 })
+                    .map(|(i, arg)| {
+                        adjust_arg_for_abi(fx, arg.value, &fn_abi.args[i], arg.is_owned).into_iter()
+                    })
+                    .flatten(),
+            )
+            .collect::<Vec<Value>>();
+
+        let call_inst = match func_ref {
+            CallTarget::Direct(func_ref) => fx.bcx.ins().call(func_ref, &call_args),
+            CallTarget::Indirect(sig, func_ptr) => {
+                fx.bcx.ins().call_indirect(sig, func_ptr, &call_args)
+            }
+        };
+
+        // FIXME find a cleaner way to support varargs
+        if fn_sig.c_variadic {
+            if !matches!(fn_sig.abi, Abi::C { .. }) {
+                fx.tcx
+                    .sess
+                    .span_fatal(span, &format!("Variadic call for non-C abi {:?}", fn_sig.abi));
+            }
+            let sig_ref = fx.bcx.func.dfg.call_signature(call_inst).unwrap();
+            let abi_params = call_args
+                .into_iter()
+                .map(|arg| {
+                    let ty = fx.bcx.func.dfg.value_type(arg);
+                    if !ty.is_int() {
+                        // FIXME set %al to upperbound on float args once floats are supported
+                        fx.tcx
+                            .sess
+                            .span_fatal(span, &format!("Non int ty {:?} for variadic call", ty));
+                    }
+                    AbiParam::new(ty)
+                })
+                .collect::<Vec<AbiParam>>();
+            fx.bcx.func.dfg.signatures[sig_ref].params = abi_params;
+        }
+
+        call_inst
+    });
 
     if let Some((_, dest)) = destination {
         let ret_block = fx.get_block(dest);
@@ -528,7 +528,8 @@ pub(crate) fn codegen_drop<'tcx>(
                     def: ty::InstanceDef::Virtual(drop_instance.def_id(), 0),
                     substs: drop_instance.substs,
                 };
-                let fn_abi = FnAbi::of_instance(&RevealAllLayoutCx(fx.tcx), virtual_drop, &[]);
+                let fn_abi =
+                    RevealAllLayoutCx(fx.tcx).fn_abi_of_instance(virtual_drop, ty::List::empty());
 
                 let sig = clif_sig_from_fn_abi(fx.tcx, fx.triple(), &fn_abi);
                 let sig = fx.bcx.import_signature(sig);
@@ -537,7 +538,8 @@ pub(crate) fn codegen_drop<'tcx>(
             _ => {
                 assert!(!matches!(drop_instance.def, InstanceDef::Virtual(_, _)));
 
-                let fn_abi = FnAbi::of_instance(&RevealAllLayoutCx(fx.tcx), drop_instance, &[]);
+                let fn_abi =
+                    RevealAllLayoutCx(fx.tcx).fn_abi_of_instance(drop_instance, ty::List::empty());
 
                 let arg_value = drop_place.place_ref(
                     fx,
@@ -546,7 +548,7 @@ pub(crate) fn codegen_drop<'tcx>(
                         TypeAndMut { ty, mutbl: crate::rustc_hir::Mutability::Mut },
                     )),
                 );
-                let arg_value = adjust_arg_for_abi(fx, arg_value, &fn_abi.args[0]);
+                let arg_value = adjust_arg_for_abi(fx, arg_value, &fn_abi.args[0], true);
 
                 let mut call_args: Vec<Value> = arg_value.into_iter().collect::<Vec<_>>();
 
@@ -554,7 +556,7 @@ pub(crate) fn codegen_drop<'tcx>(
                     // Pass the caller location for `#[track_caller]`.
                     let caller_location = fx.get_caller_location(span);
                     call_args.extend(
-                        adjust_arg_for_abi(fx, caller_location, &fn_abi.args[1]).into_iter(),
+                        adjust_arg_for_abi(fx, caller_location, &fn_abi.args[1], false).into_iter(),
                     );
                 }
 

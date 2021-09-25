@@ -1,4 +1,5 @@
-use crate::utils::{is_automatically_derived, span_lint_hir};
+use clippy_utils::diagnostics::span_lint_hir;
+use clippy_utils::is_automatically_derived;
 use if_chain::if_chain;
 use rustc_hir::{Impl, Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
@@ -6,16 +7,16 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for manual re-implementations of `PartialEq::ne`.
+    /// ### What it does
+    /// Checks for manual re-implementations of `PartialEq::ne`.
     ///
-    /// **Why is this bad?** `PartialEq::ne` is required to always return the
+    /// ### Why is this bad?
+    /// `PartialEq::ne` is required to always return the
     /// negated result of `PartialEq::eq`, which is exactly what the default
     /// implementation does. Therefore, there should never be any need to
     /// re-implement it.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// struct Foo;
     ///

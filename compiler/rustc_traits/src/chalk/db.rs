@@ -718,7 +718,7 @@ impl<'tcx> chalk_ir::UnificationDatabase<RustInterner<'tcx>> for RustIrDatabase<
     }
 }
 
-/// Creates a `InternalSubsts` that maps each generic parameter to a higher-ranked
+/// Creates an `InternalSubsts` that maps each generic parameter to a higher-ranked
 /// var bound at index `0`. For types, we use a `BoundVar` index equal to
 /// the type parameter index. For regions, we use the `BoundRegionKind::BrNamed`
 /// variant (which has a `DefId`).
@@ -735,11 +735,14 @@ fn bound_vars_for_item(tcx: TyCtxt<'tcx>, def_id: DefId) -> SubstsRef<'tcx> {
             .into(),
 
         ty::GenericParamDefKind::Lifetime => {
-            let br = ty::BoundRegion { kind: ty::BrAnon(substs.len() as u32) };
+            let br = ty::BoundRegion {
+                var: ty::BoundVar::from_usize(substs.len()),
+                kind: ty::BrAnon(substs.len() as u32),
+            };
             tcx.mk_region(ty::RegionKind::ReLateBound(ty::INNERMOST, br)).into()
         }
 
-        ty::GenericParamDefKind::Const => tcx
+        ty::GenericParamDefKind::Const { .. } => tcx
             .mk_const(ty::Const {
                 val: ty::ConstKind::Bound(ty::INNERMOST, ty::BoundVar::from(param.index)),
                 ty: tcx.type_of(param.def_id),

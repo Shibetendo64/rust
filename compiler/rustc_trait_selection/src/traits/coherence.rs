@@ -74,23 +74,22 @@ where
     let impl2_ref = tcx.impl_trait_ref(impl2_def_id);
 
     // Check if any of the input types definitely do not unify.
-    if impl1_ref
-        .iter()
-        .flat_map(|tref| tref.substs.types())
-        .zip(impl2_ref.iter().flat_map(|tref| tref.substs.types()))
-        .any(|(ty1, ty2)| {
-            let t1 = fast_reject::simplify_type(tcx, ty1, false);
-            let t2 = fast_reject::simplify_type(tcx, ty2, false);
-            if let (Some(t1), Some(t2)) = (t1, t2) {
-                // Simplified successfully
-                // Types cannot unify if they differ in their reference mutability or simplify to different types
-                t1 != t2 || ty1.ref_mutability() != ty2.ref_mutability()
-            } else {
-                // Types might unify
-                false
-            }
-        })
-    {
+    if iter::zip(
+        impl1_ref.iter().flat_map(|tref| tref.substs.types()),
+        impl2_ref.iter().flat_map(|tref| tref.substs.types()),
+    )
+    .any(|(ty1, ty2)| {
+        let t1 = fast_reject::simplify_type(tcx, ty1, false);
+        let t2 = fast_reject::simplify_type(tcx, ty2, false);
+        if let (Some(t1), Some(t2)) = (t1, t2) {
+            // Simplified successfully
+            // Types cannot unify if they differ in their reference mutability or simplify to different types
+            t1 != t2 || ty1.ref_mutability() != ty2.ref_mutability()
+        } else {
+            // Types might unify
+            false
+        }
+    }) {
         // Some types involved are definitely different, so the impls couldn't possibly overlap.
         debug!("overlapping_impls: fast_reject early-exit");
         return no_overlap();
@@ -392,7 +391,7 @@ fn orphan_check_trait_ref<'tcx>(
 ) -> Result<(), OrphanCheckErr<'tcx>> {
     debug!("orphan_check_trait_ref(trait_ref={:?}, in_crate={:?})", trait_ref, in_crate);
 
-    if trait_ref.needs_infer() && trait_ref.needs_subst() {
+    if trait_ref.needs_infer() && trait_ref.definitely_needs_subst(tcx) {
         bug!(
             "can't orphan check a trait ref with both params and inference variables {:?}",
             trait_ref
@@ -587,6 +586,11 @@ fn ty_is_local_constructor(ty: Ty<'_>, in_crate: InCrate) -> bool {
             false
         }
 
+        ty::Closure(..) => {
+            // Similar to the `Opaque` case (#83613).
+            false
+        }
+
         ty::Dynamic(ref tt, ..) => {
             if let Some(principal) = tt.principal() {
                 def_id_is_local(principal.def_id(), in_crate)
@@ -597,7 +601,7 @@ fn ty_is_local_constructor(ty: Ty<'_>, in_crate: InCrate) -> bool {
 
         ty::Error(_) => true,
 
-        ty::Closure(..) | ty::Generator(..) | ty::GeneratorWitness(..) => {
+        ty::Generator(..) | ty::GeneratorWitness(..) => {
             bug!("ty_is_local invoked on unexpected type: {:?}", ty)
         }
     }

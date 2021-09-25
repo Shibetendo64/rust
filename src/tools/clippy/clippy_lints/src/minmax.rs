@@ -1,5 +1,6 @@
-use crate::consts::{constant_simple, Constant};
-use crate::utils::{match_def_path, match_trait_method, paths, span_lint};
+use clippy_utils::consts::{constant_simple, Constant};
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::{match_def_path, match_trait_method, paths};
 use if_chain::if_chain;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
@@ -7,15 +8,15 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use std::cmp::Ordering;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for expressions where `std::cmp::min` and `max` are
+    /// ### What it does
+    /// Checks for expressions where `std::cmp::min` and `max` are
     /// used to clamp values, but switched so that the result is constant.
     ///
-    /// **Why is this bad?** This is in all probability not the intended outcome. At
+    /// ### Why is this bad?
+    /// This is in all probability not the intended outcome. At
     /// the least it hurts readability of the code.
     ///
-    /// **Known problems:** None
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```ignore
     /// min(0, max(100, x))
     /// ```
@@ -66,7 +67,7 @@ enum MinMax {
 
 fn min_max<'a>(cx: &LateContext<'_>, expr: &'a Expr<'a>) -> Option<(MinMax, Constant, &'a Expr<'a>)> {
     match expr.kind {
-        ExprKind::Call(ref path, ref args) => {
+        ExprKind::Call(path, args) => {
             if let ExprKind::Path(ref qpath) = path.kind {
                 cx.typeck_results()
                     .qpath_res(qpath, path.hir_id)
@@ -84,7 +85,7 @@ fn min_max<'a>(cx: &LateContext<'_>, expr: &'a Expr<'a>) -> Option<(MinMax, Cons
                 None
             }
         },
-        ExprKind::MethodCall(ref path, _, ref args, _) => {
+        ExprKind::MethodCall(path, _, args, _) => {
             if_chain! {
                 if let [obj, _] = args;
                 if cx.typeck_results().expr_ty(obj).is_floating_point() || match_trait_method(cx, expr, &paths::ORD);

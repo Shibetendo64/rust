@@ -76,6 +76,7 @@ use crate::check::dropck;
 use crate::check::FnCtxt;
 use crate::mem_categorization as mc;
 use crate::middle::region;
+use rustc_data_structures::stable_set::FxHashSet;
 use rustc_hir as hir;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
@@ -126,7 +127,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Region checking during the WF phase for items. `wf_tys` are the
     /// types from which we should derive implied bounds, if any.
-    pub fn regionck_item(&self, item_id: hir::HirId, span: Span, wf_tys: &[Ty<'tcx>]) {
+    pub fn regionck_item(&self, item_id: hir::HirId, span: Span, wf_tys: FxHashSet<Ty<'tcx>>) {
         debug!("regionck_item(item.id={:?}, wf_tys={:?})", item_id, wf_tys);
         let subject = self.tcx.hir().local_def_id(item_id);
         let mut rcx = RegionCtxt::new(self, item_id, Subject(subject), self.param_env);
@@ -144,11 +145,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// rest of type check and because sometimes we need type
     /// inference to have completed before we can determine which
     /// constraints to add.
-    pub fn regionck_fn(&self, fn_id: hir::HirId, body: &'tcx hir::Body<'tcx>) {
+    pub(crate) fn regionck_fn(
+        &self,
+        fn_id: hir::HirId,
+        body: &'tcx hir::Body<'tcx>,
+        span: Span,
+        wf_tys: FxHashSet<Ty<'tcx>>,
+    ) {
         debug!("regionck_fn(id={})", fn_id);
         let subject = self.tcx.hir().body_owner_def_id(body.id());
         let hir_id = body.value.hir_id;
         let mut rcx = RegionCtxt::new(self, hir_id, Subject(subject), self.param_env);
+        // We need to add the implied bounds from the function signature
+        rcx.outlives_environment.add_implied_bounds(self, wf_tys, fn_id, span);
+        rcx.outlives_environment.save_implied_bounds(fn_id);
 
         if !self.errors_reported_since_creation() {
             // regionck assumes typeck succeeded
@@ -277,24 +287,16 @@ impl<'a, 'tcx> RegionCtxt<'a, 'tcx> {
         // because it will have no effect.
         //
         // FIXME(#27579) return types should not be implied bounds
-        let fn_sig_tys: Vec<_> =
+        let fn_sig_tys: FxHashSet<_> =
             fn_sig.inputs().iter().cloned().chain(Some(fn_sig.output())).collect();
 
-        self.outlives_environment.add_implied_bounds(
-            self.fcx,
-            &fn_sig_tys[..],
-            body_id.hir_id,
-            span,
-        );
+        self.outlives_environment.add_implied_bounds(self.fcx, fn_sig_tys, body_id.hir_id, span);
         self.outlives_environment.save_implied_bounds(body_id.hir_id);
         self.link_fn_params(&body.params);
         self.visit_body(body);
         self.visit_region_obligations(body_id.hir_id);
 
-        self.constrain_opaque_types(
-            &self.fcx.opaque_types.borrow(),
-            self.outlives_environment.free_region_map(),
-        );
+        self.constrain_opaque_types(self.outlives_environment.free_region_map());
     }
 
     fn visit_region_obligations(&mut self, hir_id: hir::HirId) {
@@ -771,21 +773,39 @@ impl<'a, 'tcx> RegionCtxt<'a, 'tcx> {
         debug!("link_upvar_region(borrorw_region={:?}, upvar_id={:?}", borrow_region, upvar_id);
         // A by-reference upvar can't be borrowed for longer than the
         // upvar is borrowed from the environment.
-        match self.typeck_results.borrow().upvar_capture(upvar_id) {
-            ty::UpvarCapture::ByRef(upvar_borrow) => {
-                self.sub_regions(
-                    infer::ReborrowUpvar(span, upvar_id),
-                    borrow_region,
-                    upvar_borrow.region,
-                );
-                if let ty::ImmBorrow = upvar_borrow.kind {
-                    debug!("link_upvar_region: capture by shared ref");
-                    return;
+        let closure_local_def_id = upvar_id.closure_expr_id;
+        let mut all_captures_are_imm_borrow = true;
+        for captured_place in self
+            .typeck_results
+            .borrow()
+            .closure_min_captures
+            .get(&closure_local_def_id.to_def_id())
+            .and_then(|root_var_min_cap| root_var_min_cap.get(&upvar_id.var_path.hir_id))
+            .into_iter()
+            .flatten()
+        {
+            match captured_place.info.capture_kind {
+                ty::UpvarCapture::ByRef(upvar_borrow) => {
+                    self.sub_regions(
+                        infer::ReborrowUpvar(span, upvar_id),
+                        borrow_region,
+                        upvar_borrow.region,
+                    );
+                    if let ty::ImmBorrow = upvar_borrow.kind {
+                        debug!("link_upvar_region: capture by shared ref");
+                    } else {
+                        all_captures_are_imm_borrow = false;
+                    }
+                }
+                ty::UpvarCapture::ByValue(_) => {
+                    all_captures_are_imm_borrow = false;
                 }
             }
-            ty::UpvarCapture::ByValue(_) => {}
         }
-        let fn_hir_id = self.tcx.hir().local_def_id_to_hir_id(upvar_id.closure_expr_id);
+        if all_captures_are_imm_borrow {
+            return;
+        }
+        let fn_hir_id = self.tcx.hir().local_def_id_to_hir_id(closure_local_def_id);
         let ty = self.resolve_node_type(fn_hir_id);
         debug!("link_upvar_region: ty={:?}", ty);
 

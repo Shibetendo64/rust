@@ -57,6 +57,13 @@ pub fn panic_str(expr: &str) -> ! {
     panic_fmt(format_args!("{}", expr));
 }
 
+#[inline]
+#[track_caller]
+#[cfg_attr(not(bootstrap), lang = "panic_display")] // needed for const-evaluated panics
+pub fn panic_display<T: fmt::Display>(x: &T) -> ! {
+    panic_fmt(format_args!("{}", *x));
+}
+
 #[cold]
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never))]
 #[track_caller]
@@ -74,6 +81,7 @@ fn panic_bounds_check(index: usize, len: usize) -> ! {
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never))]
 #[cfg_attr(feature = "panic_immediate_abort", inline)]
 #[track_caller]
+#[lang = "panic_fmt"] // needed for const-evaluated panics
 pub fn panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
     if cfg!(feature = "panic_immediate_abort") {
         super::intrinsics::abort()
@@ -90,6 +98,19 @@ pub fn panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
 
     // SAFETY: `panic_impl` is defined in safe Rust code and thus is safe to call.
     unsafe { panic_impl(&pi) }
+}
+
+/// This function is used instead of panic_fmt in const eval.
+#[lang = "const_panic_fmt"]
+pub const fn const_panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
+    if let Some(msg) = fmt.as_str() {
+        panic_str(msg);
+    } else {
+        // SAFETY: This is only evaluated at compile time, which reliably
+        // handles this UB (in case this branch turns out to be reachable
+        // somehow).
+        unsafe { crate::hint::unreachable_unchecked() };
+    }
 }
 
 #[derive(Debug)]

@@ -16,8 +16,7 @@ fn extend_lt<'a>(o: &'a str) -> &'static str {
 }
 
 fn main() {
-    let r =
-    {
+    let r = {
         let s = "abcdef".to_string();
         extend_lt(&s)
     };

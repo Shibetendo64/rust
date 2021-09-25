@@ -1,8 +1,13 @@
 use rustc_index::vec::IndexVec;
+use rustc_middle::ty::layout::{
+    FnAbiError, FnAbiOfHelpers, FnAbiRequest, LayoutError, LayoutOfHelpers,
+};
+use rustc_middle::ty::SymbolName;
 use rustc_target::abi::call::FnAbi;
 use rustc_target::abi::{Integer, Primitive};
 use rustc_target::spec::{HasTargetSpec, Target};
 
+use crate::constant::ConstantCx;
 use crate::prelude::*;
 
 pub(crate) fn pointer_ty(tcx: TyCtxt<'_>) -> types::Type {
@@ -226,14 +231,17 @@ pub(crate) fn type_sign(ty: Ty<'_>) -> bool {
     }
 }
 
-pub(crate) struct FunctionCx<'m, 'clif, 'tcx> {
-    pub(crate) cx: &'clif mut crate::CodegenCx<'m, 'tcx>,
+pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
+    pub(crate) cx: &'clif mut crate::CodegenCx<'tcx>,
+    pub(crate) module: &'m mut dyn Module,
     pub(crate) tcx: TyCtxt<'tcx>,
     pub(crate) pointer_type: Type, // Cached from module
+    pub(crate) constants_cx: ConstantCx,
 
     pub(crate) instance: Instance<'tcx>,
+    pub(crate) symbol_name: SymbolName<'tcx>,
     pub(crate) mir: &'tcx Body<'tcx>,
-    pub(crate) fn_abi: Option<FnAbi<'tcx, Ty<'tcx>>>,
+    pub(crate) fn_abi: Option<&'tcx FnAbi<'tcx, Ty<'tcx>>>,
 
     pub(crate) bcx: FunctionBuilder<'clif>,
     pub(crate) block_map: IndexVec<BasicBlock, Block>,
@@ -241,9 +249,6 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx> {
 
     /// When `#[track_caller]` is used, the implicit caller location is stored in this variable.
     pub(crate) caller_location: Option<CValue<'tcx>>,
-
-    /// See [`crate::optimize::code_layout`] for more information.
-    pub(crate) cold_blocks: EntitySet<Block>,
 
     pub(crate) clif_comments: crate::pretty_clif::CommentWriter,
     pub(crate) source_info_set: indexmap::IndexSet<SourceInfo>,
@@ -254,12 +259,26 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx> {
     pub(crate) inline_asm_index: u32,
 }
 
-impl<'tcx> LayoutOf for FunctionCx<'_, '_, 'tcx> {
-    type Ty = Ty<'tcx>;
-    type TyAndLayout = TyAndLayout<'tcx>;
+impl<'tcx> LayoutOfHelpers<'tcx> for FunctionCx<'_, '_, 'tcx> {
+    type LayoutOfResult = TyAndLayout<'tcx>;
 
-    fn layout_of(&self, ty: Ty<'tcx>) -> TyAndLayout<'tcx> {
-        RevealAllLayoutCx(self.tcx).layout_of(ty)
+    #[inline]
+    fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
+        RevealAllLayoutCx(self.tcx).handle_layout_err(err, span, ty)
+    }
+}
+
+impl<'tcx> FnAbiOfHelpers<'tcx> for FunctionCx<'_, '_, 'tcx> {
+    type FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>;
+
+    #[inline]
+    fn handle_fn_abi_err(
+        &self,
+        err: FnAbiError<'tcx>,
+        span: Span,
+        fn_abi_request: FnAbiRequest<'tcx>,
+    ) -> ! {
+        RevealAllLayoutCx(self.tcx).handle_fn_abi_err(err, span, fn_abi_request)
     }
 }
 
@@ -331,7 +350,9 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
         let topmost = span.ctxt().outer_expn().expansion_cause().unwrap_or(span);
         let caller = self.tcx.sess.source_map().lookup_char_pos(topmost.lo());
         let const_loc = self.tcx.const_caller_location((
-            rustc_span::symbol::Symbol::intern(&caller.file.name.to_string()),
+            rustc_span::symbol::Symbol::intern(
+                &caller.file.name.prefer_remapped().to_string_lossy(),
+            ),
             caller.line as u32,
             caller.col_display as u32 + 1,
         ));
@@ -339,30 +360,19 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
     }
 
     pub(crate) fn triple(&self) -> &target_lexicon::Triple {
-        self.cx.module.isa().triple()
+        self.module.isa().triple()
     }
 
-    pub(crate) fn anonymous_str(&mut self, prefix: &str, msg: &str) -> Value {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        msg.hash(&mut hasher);
-        let msg_hash = hasher.finish();
+    pub(crate) fn anonymous_str(&mut self, msg: &str) -> Value {
         let mut data_ctx = DataContext::new();
         data_ctx.define(msg.as_bytes().to_vec().into_boxed_slice());
-        let msg_id = self
-            .cx
-            .module
-            .declare_data(&format!("__{}_{:08x}", prefix, msg_hash), Linkage::Local, false, false)
-            .unwrap();
+        let msg_id = self.module.declare_anonymous_data(false, false).unwrap();
 
         // Ignore DuplicateDefinition error, as the data will be the same
-        let _ = self.cx.module.define_data(msg_id, &data_ctx);
+        let _ = self.module.define_data(msg_id, &data_ctx);
 
-        let local_msg_id = self.cx.module.declare_data_in_func(msg_id, self.bcx.func);
-        #[cfg(debug_assertions)]
-        {
+        let local_msg_id = self.module.declare_data_in_func(msg_id, self.bcx.func);
+        if self.clif_comments.enabled() {
             self.add_comment(local_msg_id, msg);
         }
         self.bcx.ins().global_value(self.pointer_type, local_msg_id)
@@ -371,19 +381,53 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
 
 pub(crate) struct RevealAllLayoutCx<'tcx>(pub(crate) TyCtxt<'tcx>);
 
-impl<'tcx> LayoutOf for RevealAllLayoutCx<'tcx> {
-    type Ty = Ty<'tcx>;
-    type TyAndLayout = TyAndLayout<'tcx>;
+impl<'tcx> LayoutOfHelpers<'tcx> for RevealAllLayoutCx<'tcx> {
+    type LayoutOfResult = TyAndLayout<'tcx>;
 
-    fn layout_of(&self, ty: Ty<'tcx>) -> TyAndLayout<'tcx> {
-        assert!(!ty.still_further_specializable());
-        self.0.layout_of(ParamEnv::reveal_all().and(&ty)).unwrap_or_else(|e| {
-            if let layout::LayoutError::SizeOverflow(_) = e {
-                self.0.sess.fatal(&e.to_string())
-            } else {
-                bug!("failed to get layout for `{}`: {}", ty, e)
+    #[inline]
+    fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
+        if let layout::LayoutError::SizeOverflow(_) = err {
+            self.0.sess.span_fatal(span, &err.to_string())
+        } else {
+            span_bug!(span, "failed to get layout for `{}`: {}", ty, err)
+        }
+    }
+}
+
+impl<'tcx> FnAbiOfHelpers<'tcx> for RevealAllLayoutCx<'tcx> {
+    type FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>;
+
+    #[inline]
+    fn handle_fn_abi_err(
+        &self,
+        err: FnAbiError<'tcx>,
+        span: Span,
+        fn_abi_request: FnAbiRequest<'tcx>,
+    ) -> ! {
+        if let FnAbiError::Layout(LayoutError::SizeOverflow(_)) = err {
+            self.0.sess.span_fatal(span, &err.to_string())
+        } else {
+            match fn_abi_request {
+                FnAbiRequest::OfFnPtr { sig, extra_args } => {
+                    span_bug!(
+                        span,
+                        "`fn_abi_of_fn_ptr({}, {:?})` failed: {}",
+                        sig,
+                        extra_args,
+                        err
+                    );
+                }
+                FnAbiRequest::OfInstance { instance, extra_args } => {
+                    span_bug!(
+                        span,
+                        "`fn_abi_of_instance({}, {:?})` failed: {}",
+                        instance,
+                        extra_args,
+                        err
+                    );
+                }
             }
-        })
+        }
     }
 }
 

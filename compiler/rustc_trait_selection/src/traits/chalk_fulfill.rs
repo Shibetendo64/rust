@@ -7,16 +7,21 @@ use crate::traits::{
     ChalkEnvironmentAndGoal, FulfillmentError, FulfillmentErrorCode, ObligationCause,
     PredicateObligation, SelectionError, TraitEngine,
 };
-use rustc_data_structures::fx::FxIndexSet;
+use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
 use rustc_middle::ty::{self, Ty};
 
 pub struct FulfillmentContext<'tcx> {
     obligations: FxIndexSet<PredicateObligation<'tcx>>,
+
+    relationships: FxHashMap<ty::TyVid, ty::FoundRelationships>,
 }
 
 impl FulfillmentContext<'tcx> {
     crate fn new() -> Self {
-        FulfillmentContext { obligations: FxIndexSet::default() }
+        FulfillmentContext {
+            obligations: FxIndexSet::default(),
+            relationships: FxHashMap::default(),
+        }
     }
 }
 
@@ -39,6 +44,8 @@ impl TraitEngine<'tcx> for FulfillmentContext<'tcx> {
         assert!(!infcx.is_in_snapshot());
         let obligation = infcx.resolve_vars_if_possible(obligation);
 
+        super::relationships::update(self, infcx, &obligation);
+
         self.obligations.insert(obligation);
     }
 
@@ -57,7 +64,9 @@ impl TraitEngine<'tcx> for FulfillmentContext<'tcx> {
                 .map(|obligation| FulfillmentError {
                     obligation: obligation.clone(),
                     code: FulfillmentErrorCode::CodeAmbiguity,
-                    points_at_arg_span: false,
+                    // FIXME - does Chalk have a notation of 'root obligation'?
+                    // This is just for diagnostics, so it's okay if this is wrong
+                    root_obligation: obligation.clone(),
                 })
                 .collect();
             Err(errors)
@@ -105,11 +114,13 @@ impl TraitEngine<'tcx> for FulfillmentContext<'tcx> {
                                 ),
 
                                 Err(_err) => errors.push(FulfillmentError {
-                                    obligation,
+                                    obligation: obligation.clone(),
                                     code: FulfillmentErrorCode::CodeSelectionError(
                                         SelectionError::Unimplemented,
                                     ),
-                                    points_at_arg_span: false,
+                                    // FIXME - does Chalk have a notation of 'root obligation'?
+                                    // This is just for diagnostics, so it's okay if this is wrong
+                                    root_obligation: obligation,
                                 }),
                             }
                         } else {
@@ -119,11 +130,13 @@ impl TraitEngine<'tcx> for FulfillmentContext<'tcx> {
                     }
 
                     Err(NoSolution) => errors.push(FulfillmentError {
-                        obligation,
+                        obligation: obligation.clone(),
                         code: FulfillmentErrorCode::CodeSelectionError(
                             SelectionError::Unimplemented,
                         ),
-                        points_at_arg_span: false,
+                        // FIXME - does Chalk have a notation of 'root obligation'?
+                        // This is just for diagnostics, so it's okay if this is wrong
+                        root_obligation: obligation,
                     }),
                 }
             }
@@ -139,5 +152,9 @@ impl TraitEngine<'tcx> for FulfillmentContext<'tcx> {
 
     fn pending_obligations(&self) -> Vec<PredicateObligation<'tcx>> {
         self.obligations.iter().cloned().collect()
+    }
+
+    fn relationships(&mut self) -> &mut FxHashMap<ty::TyVid, ty::FoundRelationships> {
+        &mut self.relationships
     }
 }

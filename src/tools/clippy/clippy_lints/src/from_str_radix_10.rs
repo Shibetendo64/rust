@@ -1,3 +1,6 @@
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::sugg::Sugg;
+use clippy_utils::ty::is_type_diagnostic_item;
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::{def, Expr, ExprKind, PrimTy, QPath, TyKind};
@@ -6,25 +9,23 @@ use rustc_middle::ty::Ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::symbol::sym;
 
-use crate::utils::is_type_diagnostic_item;
-use crate::utils::span_lint_and_sugg;
-use crate::utils::sugg::Sugg;
-
 declare_clippy_lint! {
-    /// **What it does:**
+    /// ### What it does
+    ///
     /// Checks for function invocations of the form `primitive::from_str_radix(s, 10)`
     ///
-    /// **Why is this bad?**
+    /// ### Why is this bad?
+    ///
     /// This specific common use case can be rewritten as `s.parse::<primitive>()`
     /// (and in most cases, the turbofish can be removed), which reduces code length
     /// and complexity.
     ///
-    /// **Known problems:**
+    /// ### Known problems
+    ///
     /// This lint may suggest using (&<expression>).parse() instead of <expression>.parse() directly
     /// in some cases, which is correct but adds unnecessary complexity to the code.
     ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```ignore
     /// let input: &str = get_input();
     /// let num = u16::from_str_radix(input, 10)?;

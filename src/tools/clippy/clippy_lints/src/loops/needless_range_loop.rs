@@ -1,9 +1,9 @@
 use super::NEEDLESS_RANGE_LOOP;
-use crate::utils::visitors::LocalUsedVisitor;
-use crate::utils::{
-    contains_name, has_iter_method, higher, is_integer_const, match_trait_method, multispan_sugg, path_to_local_id,
-    paths, snippet, span_lint_and_then, sugg, SpanlessEq,
-};
+use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
+use clippy_utils::source::snippet;
+use clippy_utils::ty::has_iter_method;
+use clippy_utils::visitors::is_local_used;
+use clippy_utils::{contains_name, higher, is_integer_const, match_trait_method, paths, sugg, SpanlessEq};
 use if_chain::if_chain;
 use rustc_ast::ast;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -15,7 +15,7 @@ use rustc_middle::hir::map::Map;
 use rustc_middle::middle::region;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::symbol::{sym, Symbol};
-use std::iter::Iterator;
+use std::iter::{self, Iterator};
 use std::mem;
 
 /// Checks for looping over a range and then indexing a sequence with it.
@@ -32,7 +32,7 @@ pub(super) fn check<'tcx>(
         start: Some(start),
         ref end,
         limits,
-    }) = higher::range(arg)
+    }) = higher::Range::hir(arg)
     {
         // the var must be a single name
         if let PatKind::Binding(_, canonical_id, ident, _) = pat.kind {
@@ -94,7 +94,7 @@ pub(super) fn check<'tcx>(
                 let take = if let Some(end) = *end {
                     let mut take_expr = end;
 
-                    if let ExprKind::Binary(ref op, ref left, ref right) = end.kind {
+                    if let ExprKind::Binary(ref op, left, right) = end.kind {
                         if let BinOpKind::Add = op.node {
                             let start_equal_left = SpanlessEq::new(cx).eq_expr(start, left);
                             let start_equal_right = SpanlessEq::new(cx).eq_expr(start, right);
@@ -144,7 +144,7 @@ pub(super) fn check<'tcx>(
                     span_lint_and_then(
                         cx,
                         NEEDLESS_RANGE_LOOP,
-                        expr.span,
+                        arg.span,
                         &format!("the loop variable `{}` is used to index `{}`", ident.name, indexed),
                         |diag| {
                             multispan_sugg(
@@ -170,7 +170,7 @@ pub(super) fn check<'tcx>(
                     span_lint_and_then(
                         cx,
                         NEEDLESS_RANGE_LOOP,
-                        expr.span,
+                        arg.span,
                         &format!("the loop variable `{}` is only used to index `{}`", ident.name, indexed),
                         |diag| {
                             multispan_sugg(
@@ -188,10 +188,10 @@ pub(super) fn check<'tcx>(
 
 fn is_len_call(expr: &Expr<'_>, var: Symbol) -> bool {
     if_chain! {
-        if let ExprKind::MethodCall(ref method, _, ref len_args, _) = expr.kind;
+        if let ExprKind::MethodCall(method, _, len_args, _) = expr.kind;
         if len_args.len() == 1;
-        if method.ident.name == sym!(len);
-        if let ExprKind::Path(QPath::Resolved(_, ref path)) = len_args[0].kind;
+        if method.ident.name == sym::len;
+        if let ExprKind::Path(QPath::Resolved(_, path)) = len_args[0].kind;
         if path.segments.len() == 1;
         if path.segments[0].ident.name == var;
         then {
@@ -252,51 +252,42 @@ impl<'a, 'tcx> VarVisitor<'a, 'tcx> {
         if_chain! {
             // the indexed container is referenced by a name
             if let ExprKind::Path(ref seqpath) = seqexpr.kind;
-            if let QPath::Resolved(None, ref seqvar) = *seqpath;
+            if let QPath::Resolved(None, seqvar) = *seqpath;
             if seqvar.segments.len() == 1;
+            if is_local_used(self.cx, idx, self.var);
             then {
-                let index_used_directly = path_to_local_id(idx, self.var);
-                let indexed_indirectly = {
-                    let mut used_visitor = LocalUsedVisitor::new(self.cx, self.var);
-                    walk_expr(&mut used_visitor, idx);
-                    used_visitor.used
-                };
-
-                if indexed_indirectly || index_used_directly {
-                    if self.prefer_mutable {
-                        self.indexed_mut.insert(seqvar.segments[0].ident.name);
-                    }
-                    let res = self.cx.qpath_res(seqpath, seqexpr.hir_id);
-                    match res {
-                        Res::Local(hir_id) => {
-                            let parent_id = self.cx.tcx.hir().get_parent_item(expr.hir_id);
-                            let parent_def_id = self.cx.tcx.hir().local_def_id(parent_id);
-                            let extent = self.cx.tcx.region_scope_tree(parent_def_id).var_scope(hir_id.local_id);
-                            if indexed_indirectly {
-                                self.indexed_indirectly.insert(seqvar.segments[0].ident.name, Some(extent));
-                            }
-                            if index_used_directly {
-                                self.indexed_directly.insert(
-                                    seqvar.segments[0].ident.name,
-                                    (Some(extent), self.cx.typeck_results().node_type(seqexpr.hir_id)),
-                                );
-                            }
-                            return false;  // no need to walk further *on the variable*
+                if self.prefer_mutable {
+                    self.indexed_mut.insert(seqvar.segments[0].ident.name);
+                }
+                let index_used_directly = matches!(idx.kind, ExprKind::Path(_));
+                let res = self.cx.qpath_res(seqpath, seqexpr.hir_id);
+                match res {
+                    Res::Local(hir_id) => {
+                        let parent_id = self.cx.tcx.hir().get_parent_item(expr.hir_id);
+                        let parent_def_id = self.cx.tcx.hir().local_def_id(parent_id);
+                        let extent = self.cx.tcx.region_scope_tree(parent_def_id).var_scope(hir_id.local_id);
+                        if index_used_directly {
+                            self.indexed_directly.insert(
+                                seqvar.segments[0].ident.name,
+                                (Some(extent), self.cx.typeck_results().node_type(seqexpr.hir_id)),
+                            );
+                        } else {
+                            self.indexed_indirectly.insert(seqvar.segments[0].ident.name, Some(extent));
                         }
-                        Res::Def(DefKind::Static | DefKind::Const, ..) => {
-                            if indexed_indirectly {
-                                self.indexed_indirectly.insert(seqvar.segments[0].ident.name, None);
-                            }
-                            if index_used_directly {
-                                self.indexed_directly.insert(
-                                    seqvar.segments[0].ident.name,
-                                    (None, self.cx.typeck_results().node_type(seqexpr.hir_id)),
-                                );
-                            }
-                            return false;  // no need to walk further *on the variable*
-                        }
-                        _ => (),
+                        return false;  // no need to walk further *on the variable*
                     }
+                    Res::Def(DefKind::Static | DefKind::Const, ..) => {
+                        if index_used_directly {
+                            self.indexed_directly.insert(
+                                seqvar.segments[0].ident.name,
+                                (None, self.cx.typeck_results().node_type(seqexpr.hir_id)),
+                            );
+                        } else {
+                            self.indexed_indirectly.insert(seqvar.segments[0].ident.name, None);
+                        }
+                        return false;  // no need to walk further *on the variable*
+                    }
+                    _ => (),
                 }
             }
         }
@@ -310,16 +301,16 @@ impl<'a, 'tcx> Visitor<'tcx> for VarVisitor<'a, 'tcx> {
     fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
         if_chain! {
             // a range index op
-            if let ExprKind::MethodCall(ref meth, _, ref args, _) = expr.kind;
+            if let ExprKind::MethodCall(meth, _, [args_0, args_1, ..], _) = &expr.kind;
             if (meth.ident.name == sym::index && match_trait_method(self.cx, expr, &paths::INDEX))
                 || (meth.ident.name == sym::index_mut && match_trait_method(self.cx, expr, &paths::INDEX_MUT));
-            if !self.check(&args[1], &args[0], expr);
+            if !self.check(args_1, args_0, expr);
             then { return }
         }
 
         if_chain! {
             // an index op
-            if let ExprKind::Index(ref seqexpr, ref idx) = expr.kind;
+            if let ExprKind::Index(seqexpr, idx) = expr.kind;
             if !self.check(idx, seqexpr, expr);
             then { return }
         }
@@ -340,19 +331,19 @@ impl<'a, 'tcx> Visitor<'tcx> for VarVisitor<'a, 'tcx> {
 
         let old = self.prefer_mutable;
         match expr.kind {
-            ExprKind::AssignOp(_, ref lhs, ref rhs) | ExprKind::Assign(ref lhs, ref rhs, _) => {
+            ExprKind::AssignOp(_, lhs, rhs) | ExprKind::Assign(lhs, rhs, _) => {
                 self.prefer_mutable = true;
                 self.visit_expr(lhs);
                 self.prefer_mutable = false;
                 self.visit_expr(rhs);
             },
-            ExprKind::AddrOf(BorrowKind::Ref, mutbl, ref expr) => {
+            ExprKind::AddrOf(BorrowKind::Ref, mutbl, expr) => {
                 if mutbl == Mutability::Mut {
                     self.prefer_mutable = true;
                 }
                 self.visit_expr(expr);
             },
-            ExprKind::Call(ref f, args) => {
+            ExprKind::Call(f, args) => {
                 self.visit_expr(f);
                 for expr in args {
                     let ty = self.cx.typeck_results().expr_ty_adjusted(expr);
@@ -367,7 +358,7 @@ impl<'a, 'tcx> Visitor<'tcx> for VarVisitor<'a, 'tcx> {
             },
             ExprKind::MethodCall(_, _, args, _) => {
                 let def_id = self.cx.typeck_results().type_dependent_def_id(expr.hir_id).unwrap();
-                for (ty, expr) in self.cx.tcx.fn_sig(def_id).inputs().skip_binder().iter().zip(args) {
+                for (ty, expr) in iter::zip(self.cx.tcx.fn_sig(def_id).inputs().skip_binder(), args) {
                     self.prefer_mutable = false;
                     if let ty::Ref(_, _, mutbl) = *ty.kind() {
                         if mutbl == Mutability::Mut {

@@ -10,7 +10,6 @@ use crate::error::Error;
 use crate::fmt::{self, Write};
 use crate::io;
 use crate::mem;
-use crate::memchr;
 use crate::num::NonZeroU8;
 use crate::ops;
 use crate::os::raw::c_char;
@@ -20,6 +19,7 @@ use crate::slice;
 use crate::str::{self, Utf8Error};
 use crate::sync::Arc;
 use crate::sys;
+use crate::sys_common::memchr;
 
 /// A type representing an owned, C-compatible, nul-terminated string with no nul bytes in the
 /// middle.
@@ -46,7 +46,7 @@ use crate::sys;
 ///
 /// # Extracting a raw pointer to the whole C string
 ///
-/// `CString` implements a [`as_ptr`][`CStr::as_ptr`] method through the [`Deref`]
+/// `CString` implements an [`as_ptr`][`CStr::as_ptr`] method through the [`Deref`]
 /// trait. This method will give you a `*const c_char` which you can
 /// feed directly to extern functions that expect a nul-terminated
 /// string, like C's `strdup()`. Notice that [`as_ptr`][`CStr::as_ptr`] returns a
@@ -185,6 +185,7 @@ pub struct CString {
 ///
 /// [`&str`]: prim@str
 #[derive(Hash)]
+#[cfg_attr(not(test), rustc_diagnostic_item = "CStr")]
 #[stable(feature = "rust1", since = "1.0.0")]
 // FIXME:
 // `fn from` in `impl From<&CStr> for Box<CStr>` current implementation relies
@@ -498,7 +499,7 @@ impl CString {
     /// Failure to call [`CString::from_raw`] will lead to a memory leak.
     ///
     /// The C side must **not** modify the length of the string (by writing a
-    /// `NULL` somewhere inside the string or removing the final one) before
+    /// `null` somewhere inside the string or removing the final one) before
     /// it makes it back into Rust using [`CString::from_raw`]. See the safety section
     /// in [`CString::from_raw`].
     ///
@@ -613,7 +614,8 @@ impl CString {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.inner[..self.inner.len() - 1]
+        // SAFETY: CString has a length at least 1
+        unsafe { self.inner.get_unchecked(..self.inner.len() - 1) }
     }
 
     /// Equivalent to [`CString::as_bytes()`] except that the
@@ -670,6 +672,7 @@ impl CString {
     }
 
     /// Bypass "move out of struct which implements [`Drop`] trait" restriction.
+    #[inline]
     fn into_inner(self) -> Box<[u8]> {
         // Rationale: `mem::forget(self)` invalidates the previous call to `ptr::read(&self.inner)`
         // so we use `ManuallyDrop` to ensure `self` is not dropped.
@@ -727,7 +730,7 @@ impl CString {
     /// );
     /// ```
     ///
-    /// A incorrectly formatted [`Vec`] will produce an error.
+    /// An incorrectly formatted [`Vec`] will produce an error.
     ///
     /// ```
     /// #![feature(cstring_from_vec_with_nul)]
@@ -912,6 +915,7 @@ impl From<CString> for Box<CStr> {
 
 #[stable(feature = "cow_from_cstr", since = "1.28.0")]
 impl<'a> From<CString> for Cow<'a, CStr> {
+    /// Converts a [`CString`] into an owned [`Cow`] without copying or allocating.
     #[inline]
     fn from(s: CString) -> Cow<'a, CStr> {
         Cow::Owned(s)
@@ -920,6 +924,7 @@ impl<'a> From<CString> for Cow<'a, CStr> {
 
 #[stable(feature = "cow_from_cstr", since = "1.28.0")]
 impl<'a> From<&'a CStr> for Cow<'a, CStr> {
+    /// Converts a [`CStr`] into a borrowed [`Cow`] without copying or allocating.
     #[inline]
     fn from(s: &'a CStr) -> Cow<'a, CStr> {
         Cow::Borrowed(s)
@@ -928,6 +933,7 @@ impl<'a> From<&'a CStr> for Cow<'a, CStr> {
 
 #[stable(feature = "cow_from_cstr", since = "1.28.0")]
 impl<'a> From<&'a CString> for Cow<'a, CStr> {
+    /// Converts a `&`[`CString`] into a borrowed [`Cow`] without copying or allocating.
     #[inline]
     fn from(s: &'a CString) -> Cow<'a, CStr> {
         Cow::Borrowed(s.as_c_str())
@@ -936,7 +942,7 @@ impl<'a> From<&'a CString> for Cow<'a, CStr> {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<CString> for Arc<CStr> {
-    /// Converts a [`CString`] into a [`Arc`]`<CStr>` without copying or allocating.
+    /// Converts a [`CString`] into an [`Arc`]`<CStr>` without copying or allocating.
     #[inline]
     fn from(s: CString) -> Arc<CStr> {
         let arc: Arc<[u8]> = Arc::from(s.into_inner());
@@ -955,7 +961,7 @@ impl From<&CStr> for Arc<CStr> {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<CString> for Rc<CStr> {
-    /// Converts a [`CString`] into a [`Rc`]`<CStr>` without copying or allocating.
+    /// Converts a [`CString`] into an [`Rc`]`<CStr>` without copying or allocating.
     #[inline]
     fn from(s: CString) -> Rc<CStr> {
         let rc: Rc<[u8]> = Rc::from(s.into_inner());
@@ -1036,7 +1042,7 @@ impl fmt::Display for NulError {
 impl From<NulError> for io::Error {
     /// Converts a [`NulError`] into a [`io::Error`].
     fn from(_: NulError) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidInput, "data provided contains a nul byte")
+        io::Error::new_const(io::ErrorKind::InvalidInput, &"data provided contains a nul byte")
     }
 }
 
@@ -1322,7 +1328,8 @@ impl CStr {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn to_bytes(&self) -> &[u8] {
         let bytes = self.to_bytes_with_nul();
-        &bytes[..bytes.len() - 1]
+        // SAFETY: to_bytes_with_nul returns slice with length at least 1
+        unsafe { bytes.get_unchecked(..bytes.len() - 1) }
     }
 
     /// Converts this C string to a byte slice containing the trailing 0 byte.

@@ -1,25 +1,23 @@
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::ty::implements_trait;
+use clippy_utils::{self, get_trait_def_id, paths};
 use if_chain::if_chain;
 use rustc_hir::{BinOpKind, Expr, ExprKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
-use crate::utils::{self, paths, span_lint};
-
 declare_clippy_lint! {
-    /// **What it does:**
+    /// ### What it does
     /// Checks for the usage of negated comparison operators on types which only implement
     /// `PartialOrd` (e.g., `f64`).
     ///
-    /// **Why is this bad?**
+    /// ### Why is this bad?
     /// These operators make it easy to forget that the underlying types actually allow not only three
     /// potential Orderings (Less, Equal, Greater) but also a fourth one (Uncomparable). This is
     /// especially easy to miss if the operator based comparison result is negated.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// use std::cmp::Ordering;
     ///
@@ -50,8 +48,8 @@ impl<'tcx> LateLintPass<'tcx> for NoNegCompOpForPartialOrd {
         if_chain! {
 
             if !in_external_macro(cx.sess(), expr.span);
-            if let ExprKind::Unary(UnOp::Not, ref inner) = expr.kind;
-            if let ExprKind::Binary(ref op, ref left, _) = inner.kind;
+            if let ExprKind::Unary(UnOp::Not, inner) = expr.kind;
+            if let ExprKind::Binary(ref op, left, _) = inner.kind;
             if let BinOpKind::Le | BinOpKind::Ge | BinOpKind::Lt | BinOpKind::Gt = op.node;
 
             then {
@@ -59,8 +57,8 @@ impl<'tcx> LateLintPass<'tcx> for NoNegCompOpForPartialOrd {
                 let ty = cx.typeck_results().expr_ty(left);
 
                 let implements_ord = {
-                    if let Some(id) = utils::get_trait_def_id(cx, &paths::ORD) {
-                        utils::implements_trait(cx, ty, id, &[])
+                    if let Some(id) = get_trait_def_id(cx, &paths::ORD) {
+                        implements_trait(cx, ty, id, &[])
                     } else {
                         return;
                     }
@@ -68,7 +66,7 @@ impl<'tcx> LateLintPass<'tcx> for NoNegCompOpForPartialOrd {
 
                 let implements_partial_ord = {
                     if let Some(id) = cx.tcx.lang_items().partial_ord_trait() {
-                        utils::implements_trait(cx, ty, id, &[])
+                        implements_trait(cx, ty, id, &[])
                     } else {
                         return;
                     }
@@ -83,7 +81,7 @@ impl<'tcx> LateLintPass<'tcx> for NoNegCompOpForPartialOrd {
                         types produces code that is hard to read and refactor, please \
                         consider using the `partial_cmp` method instead, to make it \
                         clear that the two values could be incomparable"
-                    )
+                    );
                 }
             }
         }

@@ -3,10 +3,9 @@
 // edition:2018
 
 async fn copy() -> Result<()>
-//~^ ERROR this enum takes 2 type arguments but only 1 type argument was supplied
+//~^ ERROR this enum takes 2 generic arguments
 {
     Ok(())
-    //~^ ERROR type annotations needed
 }
 
 fn main() { }

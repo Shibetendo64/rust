@@ -1,4 +1,4 @@
-use super::{plain_text_summary, short_markdown_summary};
+use super::{find_testable_code, plain_text_summary, short_markdown_summary};
 use super::{ErrorCodes, IdMap, Ignore, LangString, Markdown, MarkdownHtml};
 use rustc_span::edition::{Edition, DEFAULT_EDITION};
 
@@ -221,10 +221,11 @@ fn test_header_ids_multiple_blocks() {
 #[test]
 fn test_short_markdown_summary() {
     fn t(input: &str, expect: &str) {
-        let output = short_markdown_summary(input);
+        let output = short_markdown_summary(input, &[][..]);
         assert_eq!(output, expect, "original: {}", input);
     }
 
+    t("", "");
     t("hello [Rust](https://www.rust-lang.org) :)", "hello Rust :)");
     t("*italic*", "<em>italic</em>");
     t("**bold**", "<strong>bold</strong>");
@@ -232,8 +233,19 @@ fn test_short_markdown_summary() {
     t("Hard-break  \nsummary", "Hard-break summary");
     t("hello [Rust] :)\n\n[Rust]: https://www.rust-lang.org", "hello Rust :)");
     t("hello [Rust](https://www.rust-lang.org \"Rust\") :)", "hello Rust :)");
+    t("dud [link]", "dud [link]");
     t("code `let x = i32;` ...", "code <code>let x = i32;</code> …");
-    t("type `Type<'static>` ...", "type <code>Type<'static></code> …");
+    t("type `Type<'static>` ...", "type <code>Type&lt;&#39;static&gt;</code> …");
+    // Test to ensure escaping and length-limiting work well together.
+    // The output should be limited based on the input length,
+    // rather than the output, because escaped versions of characters
+    // are usually longer than how the character is actually displayed.
+    t(
+        "& & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & & &",
+        "&amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; \
+         &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; &amp; \
+         &amp; &amp; &amp; &amp; &amp; …",
+    );
     t("# top header", "top header");
     t("# top header\n\nfollowed by a paragraph", "top header");
     t("## header", "header");
@@ -253,12 +265,14 @@ fn test_plain_text_summary() {
         assert_eq!(output, expect, "original: {}", input);
     }
 
+    t("", "");
     t("hello [Rust](https://www.rust-lang.org) :)", "hello Rust :)");
     t("**bold**", "bold");
     t("Multi-line\nsummary", "Multi-line summary");
     t("Hard-break  \nsummary", "Hard-break summary");
     t("hello [Rust] :)\n\n[Rust]: https://www.rust-lang.org", "hello Rust :)");
     t("hello [Rust](https://www.rust-lang.org \"Rust\") :)", "hello Rust :)");
+    t("dud [link]", "dud [link]");
     t("code `let x = i32;` ...", "code `let x = i32;` …");
     t("type `Type<'static>` ...", "type `Type<'static>` …");
     t("# top header", "top header");
@@ -285,4 +299,26 @@ fn test_markdown_html_escape() {
     t("`Struct<'a, T>`", "<p><code>Struct&lt;'a, T&gt;</code></p>\n");
     t("Struct<'a, T>", "<p>Struct&lt;’a, T&gt;</p>\n");
     t("Struct<br>", "<p>Struct&lt;br&gt;</p>\n");
+}
+
+#[test]
+fn test_find_testable_code_line() {
+    fn t(input: &str, expect: &[usize]) {
+        impl crate::doctest::Tester for Vec<usize> {
+            fn add_test(&mut self, _test: String, _config: LangString, line: usize) {
+                self.push(line);
+            }
+        }
+        let mut lines = Vec::<usize>::new();
+        find_testable_code(input, &mut lines, ErrorCodes::No, false, None);
+        assert_eq!(lines, expect);
+    }
+
+    t("", &[]);
+    t("```rust\n```", &[1]);
+    t(" ```rust\n```", &[1]);
+    t("\n```rust\n```", &[2]);
+    t("\n ```rust\n```", &[2]);
+    t("```rust\n```\n```rust\n```", &[1, 3]);
+    t("```rust\n```\n ```rust\n```", &[1, 3]);
 }

@@ -4,6 +4,7 @@ import contextlib
 import datetime
 import distutils.version
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -24,19 +25,17 @@ def support_xz():
     except tarfile.CompressionError:
         return False
 
-def get(url, path, verbose=False, do_verify=True):
-    suffix = '.sha256'
-    sha_url = url + suffix
+def get(base, url, path, checksums, verbose=False, do_verify=True):
     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
         temp_path = temp_file.name
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as sha_file:
-        sha_path = sha_file.name
 
     try:
         if do_verify:
-            download(sha_path, sha_url, False, verbose)
+            if url not in checksums:
+                raise RuntimeError("src/stage0.json doesn't contain a checksum for {}".format(url))
+            sha256 = checksums[url]
             if os.path.exists(path):
-                if verify(path, sha_path, False):
+                if verify(path, sha256, False):
                     if verbose:
                         print("using already-download file", path)
                     return
@@ -45,23 +44,17 @@ def get(url, path, verbose=False, do_verify=True):
                         print("ignoring already-download file",
                             path, "due to failed verification")
                     os.unlink(path)
-        download(temp_path, url, True, verbose)
-        if do_verify and not verify(temp_path, sha_path, verbose):
+        download(temp_path, "{}/{}".format(base, url), True, verbose)
+        if do_verify and not verify(temp_path, sha256, verbose):
             raise RuntimeError("failed verification")
         if verbose:
             print("moving {} to {}".format(temp_path, path))
         shutil.move(temp_path, path)
     finally:
-        delete_if_present(sha_path, verbose)
-        delete_if_present(temp_path, verbose)
-
-
-def delete_if_present(path, verbose):
-    """Remove the given file if present"""
-    if os.path.isfile(path):
-        if verbose:
-            print("removing", path)
-        os.unlink(path)
+        if os.path.isfile(temp_path):
+            if verbose:
+                print("removing", temp_path)
+            os.unlink(temp_path)
 
 
 def download(path, url, probably_big, verbose):
@@ -77,7 +70,7 @@ def download(path, url, probably_big, verbose):
 def _download(path, url, probably_big, verbose, exception):
     if probably_big or verbose:
         print("downloading {}".format(url))
-    # see http://serverfault.com/questions/301128/how-to-download
+    # see https://serverfault.com/questions/301128/how-to-download
     if sys.platform == 'win32':
         run(["PowerShell.exe", "/nologo", "-Command",
              "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;",
@@ -98,14 +91,12 @@ def _download(path, url, probably_big, verbose, exception):
             exception=exception)
 
 
-def verify(path, sha_path, verbose):
+def verify(path, expected, verbose):
     """Check if the sha256 sum of the given path is valid"""
     if verbose:
         print("verifying", path)
     with open(path, "rb") as source:
         found = hashlib.sha256(source.read()).hexdigest()
-    with open(sha_path, "r") as sha256sum:
-        expected = sha256sum.readline().split()[0]
     verified = found == expected
     if not verified:
         print("invalid checksum:\n"
@@ -138,7 +129,7 @@ def unpack(tarball, tarball_suffix, dst, verbose=False, match=None):
     shutil.rmtree(os.path.join(dst, fname))
 
 
-def run(args, verbose=False, exception=False, **kwargs):
+def run(args, verbose=False, exception=False, is_bootstrap=False, **kwargs):
     """Run a child program in a new process"""
     if verbose:
         print("running: " + ' '.join(args))
@@ -151,7 +142,14 @@ def run(args, verbose=False, exception=False, **kwargs):
         err = "failed to run: " + ' '.join(args)
         if verbose or exception:
             raise RuntimeError(err)
-        sys.exit(err)
+        # For most failures, we definitely do want to print this error, or the user will have no
+        # idea what went wrong. But when we've successfully built bootstrap and it failed, it will
+        # have already printed an error above, so there's no need to print the exact command we're
+        # running.
+        if is_bootstrap:
+            sys.exit(1)
+        else:
+            sys.exit(err)
 
 
 def require(cmd, exit=True):
@@ -167,15 +165,6 @@ def require(cmd, exit=True):
         print("error: unable to run `{}`: {}".format(' '.join(cmd), exc))
         print("Please make sure it's installed and in the path.")
         sys.exit(1)
-
-
-def stage0_data(rust_root):
-    """Build a dictionary from stage0.txt"""
-    nightlies = os.path.join(rust_root, "src/stage0.txt")
-    with open(nightlies, 'r') as nightlies:
-        lines = [line.rstrip() for line in nightlies
-                 if not line.startswith("#")]
-        return dict([line.split(": ", 1) for line in lines if line])
 
 
 def format_build_time(duration):
@@ -288,12 +277,14 @@ def default_build_triple(verbose):
         'i486': 'i686',
         'i686': 'i686',
         'i786': 'i686',
+        'm68k': 'm68k',
         'powerpc': 'powerpc',
         'powerpc64': 'powerpc64',
         'powerpc64le': 'powerpc64le',
         'ppc': 'powerpc',
         'ppc64': 'powerpc64',
         'ppc64le': 'powerpc64le',
+        'riscv64': 'riscv64gc',
         's390x': 's390x',
         'x64': 'x86_64',
         'x86': 'i686',
@@ -364,13 +355,22 @@ def output(filepath):
     os.rename(tmp, filepath)
 
 
+class Stage0Toolchain:
+    def __init__(self, stage0_payload):
+        self.date = stage0_payload["date"]
+        self.version = stage0_payload["version"]
+
+    def channel(self):
+        return self.version + "-" + self.date
+
+
 class RustBuild(object):
     """Provide all the methods required to build Rust"""
     def __init__(self):
-        self.date = ''
+        self.checksums_sha256 = {}
+        self.stage0_compiler = None
+        self.stage0_rustfmt = None
         self._download_url = ''
-        self.rustc_channel = ''
-        self.rustfmt_channel = ''
         self.build = ''
         self.build_dir = ''
         self.clean = False
@@ -383,7 +383,7 @@ class RustBuild(object):
         self.nix_deps_dir = None
         self.rustc_commit = None
 
-    def download_stage0(self):
+    def download_toolchain(self, stage0=True, rustc_channel=None):
         """Fetch the build system for Rust, written in Rust
 
         This method will build a cache directory, then it will fetch the
@@ -393,64 +393,75 @@ class RustBuild(object):
         Each downloaded tarball is extracted, after that, the script
         will move all the content to the right place.
         """
-        rustc_channel = self.rustc_channel
-        rustfmt_channel = self.rustfmt_channel
+        if rustc_channel is None:
+            rustc_channel = self.stage0_compiler.version
+        bin_root = self.bin_root(stage0)
 
-        if self.rustc().startswith(self.bin_root()) and \
-                (not os.path.exists(self.rustc()) or
-                 self.program_out_of_date(self.rustc_stamp(), self.date + str(self.rustc_commit))):
-            if os.path.exists(self.bin_root()):
-                shutil.rmtree(self.bin_root())
-            download_rustc = self.rustc_commit is not None
+        key = self.stage0_compiler.date
+        if not stage0:
+            key += str(self.rustc_commit)
+        if self.rustc(stage0).startswith(bin_root) and \
+                (not os.path.exists(self.rustc(stage0)) or
+                 self.program_out_of_date(self.rustc_stamp(stage0), key)):
+            if os.path.exists(bin_root):
+                shutil.rmtree(bin_root)
             tarball_suffix = '.tar.xz' if support_xz() else '.tar.gz'
             filename = "rust-std-{}-{}{}".format(
                 rustc_channel, self.build, tarball_suffix)
             pattern = "rust-std-{}".format(self.build)
-            self._download_component_helper(filename, pattern, tarball_suffix, download_rustc)
+            self._download_component_helper(filename, pattern, tarball_suffix, stage0)
             filename = "rustc-{}-{}{}".format(rustc_channel, self.build,
                                               tarball_suffix)
-            self._download_component_helper(filename, "rustc", tarball_suffix, download_rustc)
-            filename = "cargo-{}-{}{}".format(rustc_channel, self.build,
-                                              tarball_suffix)
-            self._download_component_helper(filename, "cargo", tarball_suffix)
-            if self.rustc_commit is not None:
+            self._download_component_helper(filename, "rustc", tarball_suffix, stage0)
+            # download-rustc doesn't need its own cargo, it can just use beta's.
+            if stage0:
+                filename = "cargo-{}-{}{}".format(rustc_channel, self.build,
+                                                tarball_suffix)
+                self._download_component_helper(filename, "cargo", tarball_suffix)
+                self.fix_bin_or_dylib("{}/bin/cargo".format(bin_root))
+            else:
                 filename = "rustc-dev-{}-{}{}".format(rustc_channel, self.build, tarball_suffix)
                 self._download_component_helper(
-                    filename, "rustc-dev", tarball_suffix, download_rustc
+                    filename, "rustc-dev", tarball_suffix, stage0
                 )
 
-            self.fix_bin_or_dylib("{}/bin/rustc".format(self.bin_root()))
-            self.fix_bin_or_dylib("{}/bin/rustdoc".format(self.bin_root()))
-            self.fix_bin_or_dylib("{}/bin/cargo".format(self.bin_root()))
-            lib_dir = "{}/lib".format(self.bin_root())
+            self.fix_bin_or_dylib("{}/bin/rustc".format(bin_root))
+            self.fix_bin_or_dylib("{}/bin/rustdoc".format(bin_root))
+            lib_dir = "{}/lib".format(bin_root)
             for lib in os.listdir(lib_dir):
                 if lib.endswith(".so"):
-                    self.fix_bin_or_dylib(os.path.join(lib_dir, lib), rpath_libz=True)
-            with output(self.rustc_stamp()) as rust_stamp:
-                rust_stamp.write(self.date + str(self.rustc_commit))
+                    self.fix_bin_or_dylib(os.path.join(lib_dir, lib))
+            with output(self.rustc_stamp(stage0)) as rust_stamp:
+                rust_stamp.write(key)
 
-        if self.rustfmt() and self.rustfmt().startswith(self.bin_root()) and (
+        if self.rustfmt() and self.rustfmt().startswith(bin_root) and (
             not os.path.exists(self.rustfmt())
-            or self.program_out_of_date(self.rustfmt_stamp(), self.rustfmt_channel)
+            or self.program_out_of_date(
+                self.rustfmt_stamp(),
+                "" if self.stage0_rustfmt is None else self.stage0_rustfmt.channel()
+            )
         ):
-            if rustfmt_channel:
+            if self.stage0_rustfmt is not None:
                 tarball_suffix = '.tar.xz' if support_xz() else '.tar.gz'
-                [channel, date] = rustfmt_channel.split('-', 1)
-                filename = "rustfmt-{}-{}{}".format(channel, self.build, tarball_suffix)
-                self._download_component_helper(
-                    filename, "rustfmt-preview", tarball_suffix, key=date
+                filename = "rustfmt-{}-{}{}".format(
+                    self.stage0_rustfmt.version, self.build, tarball_suffix,
                 )
-                self.fix_bin_or_dylib("{}/bin/rustfmt".format(self.bin_root()))
-                self.fix_bin_or_dylib("{}/bin/cargo-fmt".format(self.bin_root()))
+                self._download_component_helper(
+                    filename, "rustfmt-preview", tarball_suffix, key=self.stage0_rustfmt.date
+                )
+                self.fix_bin_or_dylib("{}/bin/rustfmt".format(bin_root))
+                self.fix_bin_or_dylib("{}/bin/cargo-fmt".format(bin_root))
                 with output(self.rustfmt_stamp()) as rustfmt_stamp:
-                    rustfmt_stamp.write(self.rustfmt_channel)
+                    rustfmt_stamp.write(self.stage0_rustfmt.channel())
 
-        if self.downloading_llvm():
+        # Avoid downloading LLVM twice (once for stage0 and once for the master rustc)
+        if self.downloading_llvm() and stage0:
             # We want the most recent LLVM submodule update to avoid downloading
             # LLVM more often than necessary.
             #
             # This git command finds that commit SHA, looking for bors-authored
-            # merges that modified src/llvm-project.
+            # merges that modified src/llvm-project or other relevant version
+            # stamp files.
             #
             # This works even in a repository that has not yet initialized
             # submodules.
@@ -458,11 +469,13 @@ class RustBuild(object):
                 "git", "rev-parse", "--show-toplevel",
             ]).decode(sys.getdefaultencoding()).strip()
             llvm_sha = subprocess.check_output([
-                "git", "log", "--author=bors", "--format=%H", "-n1",
-                "-m", "--first-parent",
+                "git", "rev-list", "--author=bors@rust-lang.org", "-n1",
+                "--merges", "--first-parent", "HEAD",
                 "--",
                 "{}/src/llvm-project".format(top_level),
                 "{}/src/bootstrap/download-ci-llvm-stamp".format(top_level),
+                # the LLVM shared object file is named `LLVM-12-rust-{version}-nightly`
+                "{}/src/version".format(top_level)
             ]).decode(sys.getdefaultencoding()).strip()
             llvm_assertions = self.get_toml('assertions', 'llvm') == 'true'
             llvm_root = self.llvm_root()
@@ -470,10 +483,10 @@ class RustBuild(object):
             if self.program_out_of_date(self.llvm_stamp(), llvm_sha + str(llvm_assertions)):
                 self._download_ci_llvm(llvm_sha, llvm_assertions)
                 for binary in ["llvm-config", "FileCheck"]:
-                    self.fix_bin_or_dylib(os.path.join(llvm_root, "bin", binary), rpath_libz=True)
+                    self.fix_bin_or_dylib(os.path.join(llvm_root, "bin", binary))
                 for lib in os.listdir(llvm_lib):
                     if lib.endswith(".so"):
-                        self.fix_bin_or_dylib(os.path.join(llvm_lib, lib), rpath_libz=True)
+                        self.fix_bin_or_dylib(os.path.join(llvm_lib, lib))
                 with output(self.llvm_stamp()) as llvm_stamp:
                     llvm_stamp.write(llvm_sha + str(llvm_assertions))
 
@@ -496,27 +509,35 @@ class RustBuild(object):
             or (opt == "if-available" and self.build in supported_platforms)
 
     def _download_component_helper(
-        self, filename, pattern, tarball_suffix, download_rustc=False, key=None
+        self, filename, pattern, tarball_suffix, stage0=True, key=None
     ):
         if key is None:
-            if download_rustc:
-                key = self.rustc_commit
+            if stage0:
+                key = self.stage0_compiler.date
             else:
-                key = self.date
+                key = self.rustc_commit
         cache_dst = os.path.join(self.build_dir, "cache")
         rustc_cache = os.path.join(cache_dst, key)
         if not os.path.exists(rustc_cache):
             os.makedirs(rustc_cache)
 
-        if download_rustc:
-            url = "https://ci-artifacts.rust-lang.org/rustc-builds/{}".format(self.rustc_commit)
+        if stage0:
+            base = self._download_url
+            url = "dist/{}".format(key)
         else:
-            url = "{}/dist/{}".format(self._download_url, key)
+            base = "https://ci-artifacts.rust-lang.org"
+            url = "rustc-builds/{}".format(self.rustc_commit)
         tarball = os.path.join(rustc_cache, filename)
         if not os.path.exists(tarball):
-            do_verify = not download_rustc
-            get("{}/{}".format(url, filename), tarball, verbose=self.verbose, do_verify=do_verify)
-        unpack(tarball, tarball_suffix, self.bin_root(), match=pattern, verbose=self.verbose)
+            get(
+                base,
+                "{}/{}".format(url, filename),
+                tarball,
+                self.checksums_sha256,
+                verbose=self.verbose,
+                do_verify=stage0,
+            )
+        unpack(tarball, tarball_suffix, self.bin_root(stage0), match=pattern, verbose=self.verbose)
 
     def _download_ci_llvm(self, llvm_sha, llvm_assertions):
         cache_prefix = "llvm-{}-{}".format(llvm_sha, llvm_assertions)
@@ -525,7 +546,8 @@ class RustBuild(object):
         if not os.path.exists(rustc_cache):
             os.makedirs(rustc_cache)
 
-        url = "https://ci-artifacts.rust-lang.org/rustc-builds/{}".format(llvm_sha)
+        base = "https://ci-artifacts.rust-lang.org"
+        url = "rustc-builds/{}".format(llvm_sha)
         if llvm_assertions:
             url = url.replace('rustc-builds', 'rustc-builds-alt')
         # ci-artifacts are only stored as .xz, not .gz
@@ -537,12 +559,19 @@ class RustBuild(object):
         filename = "rust-dev-nightly-" + self.build + tarball_suffix
         tarball = os.path.join(rustc_cache, filename)
         if not os.path.exists(tarball):
-            get("{}/{}".format(url, filename), tarball, verbose=self.verbose, do_verify=False)
+            get(
+                base,
+                "{}/{}".format(url, filename),
+                tarball,
+                self.checksums_sha256,
+                verbose=self.verbose,
+                do_verify=False,
+            )
         unpack(tarball, tarball_suffix, self.llvm_root(),
                 match="rust-dev",
                 verbose=self.verbose)
 
-    def fix_bin_or_dylib(self, fname, rpath_libz=False):
+    def fix_bin_or_dylib(self, fname):
         """Modifies the interpreter section of 'fname' to fix the dynamic linker,
         or the RPATH section, to fix the dynamic library search path
 
@@ -565,7 +594,13 @@ class RustBuild(object):
         if ostype != "Linux":
             return
 
-        if not os.path.exists("/etc/NIXOS"):
+        # Use `/etc/os-release` instead of `/etc/NIXOS`.
+        # The latter one does not exist on NixOS when using tmpfs as root.
+        try:
+            with open("/etc/os-release", "r") as f:
+                if not any(line.strip() == "ID=nixos" for line in f):
+                    return
+        except FileNotFoundError:
             return
         if os.path.exists("/lib"):
             return
@@ -574,59 +609,52 @@ class RustBuild(object):
         nix_os_msg = "info: you seem to be running NixOS. Attempting to patch"
         print(nix_os_msg, fname)
 
-        # Only build `stage0/.nix-deps` once.
+        # Only build `.nix-deps` once.
         nix_deps_dir = self.nix_deps_dir
         if not nix_deps_dir:
-            nix_deps_dir = "{}/.nix-deps".format(self.bin_root())
-            if not os.path.exists(nix_deps_dir):
-                os.makedirs(nix_deps_dir)
-
-            nix_deps = [
-                # Needed for the path of `ld-linux.so` (via `nix-support/dynamic-linker`).
-                "stdenv.cc.bintools",
-
-                # Needed as a system dependency of `libLLVM-*.so`.
-                "zlib",
-
-                # Needed for patching ELF binaries (see doc comment above).
-                "patchelf",
-            ]
-
             # Run `nix-build` to "build" each dependency (which will likely reuse
             # the existing `/nix/store` copy, or at most download a pre-built copy).
-            # Importantly, we don't rely on `nix-build` printing the `/nix/store`
-            # path on stdout, but use `-o` to symlink it into `stage0/.nix-deps/$dep`,
-            # ensuring garbage collection will never remove the `/nix/store` path
-            # (which would break our patched binaries that hardcode those paths).
-            for dep in nix_deps:
-                try:
-                    subprocess.check_output([
-                        "nix-build", "<nixpkgs>",
-                        "-A", dep,
-                        "-o", "{}/{}".format(nix_deps_dir, dep),
-                    ])
-                except subprocess.CalledProcessError as reason:
-                    print("warning: failed to call nix-build:", reason)
-                    return
-
+            #
+            # Importantly, we create a gc-root called `.nix-deps` in the `build/`
+            # directory, but still reference the actual `/nix/store` path in the rpath
+            # as it makes it significantly more robust against changes to the location of
+            # the `.nix-deps` location.
+            #
+            # bintools: Needed for the path of `ld-linux.so` (via `nix-support/dynamic-linker`).
+            # zlib: Needed as a system dependency of `libLLVM-*.so`.
+            # patchelf: Needed for patching ELF binaries (see doc comment above).
+            nix_deps_dir = "{}/{}".format(self.build_dir, ".nix-deps")
+            nix_expr = '''
+            with (import <nixpkgs> {});
+            symlinkJoin {
+              name = "rust-stage0-dependencies";
+              paths = [
+                zlib
+                patchelf
+                stdenv.cc.bintools
+              ];
+            }
+            '''
+            try:
+                subprocess.check_output([
+                    "nix-build", "-E", nix_expr, "-o", nix_deps_dir,
+                ])
+            except subprocess.CalledProcessError as reason:
+                print("warning: failed to call nix-build:", reason)
+                return
             self.nix_deps_dir = nix_deps_dir
 
-        patchelf = "{}/patchelf/bin/patchelf".format(nix_deps_dir)
-        patchelf_args = []
-
-        if rpath_libz:
-            # Patch RPATH to add `zlib` dependency that stems from LLVM
-            dylib_deps = ["zlib"]
-            rpath_entries = [
-                # Relative default, all binary and dynamic libraries we ship
-                # appear to have this (even when `../lib` is redundant).
-                "$ORIGIN/../lib",
-            ] + ["{}/{}/lib".format(nix_deps_dir, dep) for dep in dylib_deps]
-            patchelf_args += ["--set-rpath", ":".join(rpath_entries)]
+        patchelf = "{}/bin/patchelf".format(nix_deps_dir)
+        rpath_entries = [
+            # Relative default, all binary and dynamic libraries we ship
+            # appear to have this (even when `../lib` is redundant).
+            "$ORIGIN/../lib",
+            os.path.join(os.path.realpath(nix_deps_dir), "lib")
+        ]
+        patchelf_args = ["--set-rpath", ":".join(rpath_entries)]
         if not fname.endswith(".so"):
             # Finally, set the corret .interp for binaries
-            bintools_dir = "{}/stdenv.cc.bintools".format(nix_deps_dir)
-            with open("{}/nix-support/dynamic-linker".format(bintools_dir)) as dynamic_linker:
+            with open("{}/nix-support/dynamic-linker".format(nix_deps_dir)) as dynamic_linker:
                 patchelf_args += ["--set-interpreter", dynamic_linker.read().rstrip()]
 
         try:
@@ -635,38 +663,53 @@ class RustBuild(object):
             print("warning: failed to call patchelf:", reason)
             return
 
-    # Return the stage1 compiler to download, if any.
-    def maybe_download_rustc(self):
+    # If `download-rustc` is set, download the most recent commit with CI artifacts
+    def maybe_download_ci_toolchain(self):
         # If `download-rustc` is not set, default to rebuilding.
-        if self.get_toml("download-rustc", section="rust") != "true":
+        download_rustc = self.get_toml("download-rustc", section="rust")
+        if download_rustc is None or download_rustc == "false":
             return None
+        assert download_rustc == "true" or download_rustc == "if-unchanged", download_rustc
 
         # Handle running from a directory other than the top level
         rev_parse = ["git", "rev-parse", "--show-toplevel"]
         top_level = subprocess.check_output(rev_parse, universal_newlines=True).strip()
         compiler = "{}/compiler/".format(top_level)
+        library = "{}/library/".format(top_level)
 
         # Look for a version to compare to based on the current commit.
         # Only commits merged by bors will have CI artifacts.
-        merge_base = ["git", "log", "--author=bors", "--pretty=%H", "-n1"]
+        merge_base = [
+            "git", "rev-list", "--author=bors@rust-lang.org", "-n1",
+            "--merges", "--first-parent", "HEAD"
+        ]
         commit = subprocess.check_output(merge_base, universal_newlines=True).strip()
 
-        # Warn if there were changes to the compiler since the ancestor commit.
-        status = subprocess.call(["git", "diff-index", "--quiet", commit, "--", compiler])
+        # Warn if there were changes to the compiler or standard library since the ancestor commit.
+        status = subprocess.call(["git", "diff-index", "--quiet", commit, "--", compiler, library])
         if status != 0:
-            print("warning: `download-rustc` is enabled, but there are changes to compiler/")
+            if download_rustc == "if-unchanged":
+                return None
+            print("warning: `download-rustc` is enabled, but there are changes to \
+                   compiler/ or library/")
 
-        return commit
+        if self.verbose:
+            print("using downloaded stage1 artifacts from CI (commit {})".format(commit))
+        self.rustc_commit = commit
+        # FIXME: support downloading artifacts from the beta channel
+        self.download_toolchain(False, "nightly")
 
-    def rustc_stamp(self):
-        """Return the path for .rustc-stamp
+    def rustc_stamp(self, stage0):
+        """Return the path for .rustc-stamp at the given stage
 
         >>> rb = RustBuild()
         >>> rb.build_dir = "build"
-        >>> rb.rustc_stamp() == os.path.join("build", "stage0", ".rustc-stamp")
+        >>> rb.rustc_stamp(True) == os.path.join("build", "stage0", ".rustc-stamp")
+        True
+        >>> rb.rustc_stamp(False) == os.path.join("build", "ci-rustc", ".rustc-stamp")
         True
         """
-        return os.path.join(self.bin_root(), '.rustc-stamp')
+        return os.path.join(self.bin_root(stage0), '.rustc-stamp')
 
     def rustfmt_stamp(self):
         """Return the path for .rustfmt-stamp
@@ -676,7 +719,7 @@ class RustBuild(object):
         >>> rb.rustfmt_stamp() == os.path.join("build", "stage0", ".rustfmt-stamp")
         True
         """
-        return os.path.join(self.bin_root(), '.rustfmt-stamp')
+        return os.path.join(self.bin_root(True), '.rustfmt-stamp')
 
     def llvm_stamp(self):
         """Return the path for .rustfmt-stamp
@@ -696,21 +739,27 @@ class RustBuild(object):
         with open(stamp_path, 'r') as stamp:
             return key != stamp.read()
 
-    def bin_root(self):
-        """Return the binary root directory
+    def bin_root(self, stage0):
+        """Return the binary root directory for the given stage
 
         >>> rb = RustBuild()
         >>> rb.build_dir = "build"
-        >>> rb.bin_root() == os.path.join("build", "stage0")
+        >>> rb.bin_root(True) == os.path.join("build", "stage0")
+        True
+        >>> rb.bin_root(False) == os.path.join("build", "ci-rustc")
         True
 
         When the 'build' property is given should be a nested directory:
 
         >>> rb.build = "devel"
-        >>> rb.bin_root() == os.path.join("build", "devel", "stage0")
+        >>> rb.bin_root(True) == os.path.join("build", "devel", "stage0")
         True
         """
-        return os.path.join(self.build_dir, self.build, "stage0")
+        if stage0:
+            subdir = "stage0"
+        else:
+            subdir = "ci-rustc"
+        return os.path.join(self.build_dir, self.build, subdir)
 
     def llvm_root(self):
         """Return the CI LLVM root directory
@@ -773,33 +822,37 @@ class RustBuild(object):
         """Return config path for cargo"""
         return self.program_config('cargo')
 
-    def rustc(self):
+    def rustc(self, stage0):
         """Return config path for rustc"""
-        return self.program_config('rustc')
+        return self.program_config('rustc', stage0)
 
     def rustfmt(self):
         """Return config path for rustfmt"""
-        if not self.rustfmt_channel:
+        if self.stage0_rustfmt is None:
             return None
         return self.program_config('rustfmt')
 
-    def program_config(self, program):
-        """Return config path for the given program
+    def program_config(self, program, stage0=True):
+        """Return config path for the given program at the given stage
 
         >>> rb = RustBuild()
         >>> rb.config_toml = 'rustc = "rustc"\\n'
         >>> rb.program_config('rustc')
         'rustc'
         >>> rb.config_toml = ''
-        >>> cargo_path = rb.program_config('cargo')
-        >>> cargo_path.rstrip(".exe") == os.path.join(rb.bin_root(),
+        >>> cargo_path = rb.program_config('cargo', True)
+        >>> cargo_path.rstrip(".exe") == os.path.join(rb.bin_root(True),
+        ... "bin", "cargo")
+        True
+        >>> cargo_path = rb.program_config('cargo', False)
+        >>> cargo_path.rstrip(".exe") == os.path.join(rb.bin_root(False),
         ... "bin", "cargo")
         True
         """
         config = self.get_toml(program)
         if config:
             return os.path.expanduser(config)
-        return os.path.join(self.bin_root(), "bin", "{}{}".format(
+        return os.path.join(self.bin_root(stage0), "bin", "{}{}".format(
             program, self.exe_suffix()))
 
     @staticmethod
@@ -854,14 +907,14 @@ class RustBuild(object):
         if "CARGO_BUILD_TARGET" in env:
             del env["CARGO_BUILD_TARGET"]
         env["CARGO_TARGET_DIR"] = build_dir
-        env["RUSTC"] = self.rustc()
-        env["LD_LIBRARY_PATH"] = os.path.join(self.bin_root(), "lib") + \
+        env["RUSTC"] = self.rustc(True)
+        env["LD_LIBRARY_PATH"] = os.path.join(self.bin_root(True), "lib") + \
             (os.pathsep + env["LD_LIBRARY_PATH"]) \
             if "LD_LIBRARY_PATH" in env else ""
-        env["DYLD_LIBRARY_PATH"] = os.path.join(self.bin_root(), "lib") + \
+        env["DYLD_LIBRARY_PATH"] = os.path.join(self.bin_root(True), "lib") + \
             (os.pathsep + env["DYLD_LIBRARY_PATH"]) \
             if "DYLD_LIBRARY_PATH" in env else ""
-        env["LIBRARY_PATH"] = os.path.join(self.bin_root(), "lib") + \
+        env["LIBRARY_PATH"] = os.path.join(self.bin_root(True), "lib") + \
             (os.pathsep + env["LIBRARY_PATH"]) \
             if "LIBRARY_PATH" in env else ""
         # preserve existing RUSTFLAGS
@@ -879,12 +932,12 @@ class RustBuild(object):
         target_linker = self.get_toml("linker", build_section)
         if target_linker is not None:
             env["RUSTFLAGS"] += " -C linker=" + target_linker
-        # cfg(bootstrap): Add `-Wsemicolon_in_expressions_from_macros` after the next beta bump
         env["RUSTFLAGS"] += " -Wrust_2018_idioms -Wunused_lifetimes"
+        env["RUSTFLAGS"] += " -Wsemicolon_in_expressions_from_macros"
         if self.get_toml("deny-warnings", "rust") != "false":
             env["RUSTFLAGS"] += " -Dwarnings"
 
-        env["PATH"] = os.path.join(self.bin_root(), "bin") + \
+        env["PATH"] = os.path.join(self.bin_root(True), "bin") + \
             os.pathsep + env["PATH"]
         if not os.path.isfile(self.cargo()):
             raise Exception("no cargo executable found at `{}`".format(
@@ -959,58 +1012,52 @@ class RustBuild(object):
         slow_submodules = self.get_toml('fast-submodules') == "false"
         start_time = time()
         if slow_submodules:
-            print('Unconditionally updating all submodules')
+            print('Unconditionally updating submodules')
         else:
             print('Updating only changed submodules')
         default_encoding = sys.getdefaultencoding()
-        submodules = [s.split(' ', 1)[1] for s in subprocess.check_output(
-            ["git", "config", "--file",
-             os.path.join(self.rust_root, ".gitmodules"),
-             "--get-regexp", "path"]
-        ).decode(default_encoding).splitlines()]
+        # Only update submodules that are needed to build bootstrap.  These are needed because Cargo
+        # currently requires everything in a workspace to be "locally present" when starting a
+        # build, and will give a hard error if any Cargo.toml files are missing.
+        # FIXME: Is there a way to avoid cloning these eagerly? Bootstrap itself doesn't need to
+        #   share a workspace with any tools - maybe it could be excluded from the workspace?
+        #   That will still require cloning the submodules the second you check the standard
+        #   library, though...
+        # FIXME: Is there a way to avoid hard-coding the submodules required?
+        # WARNING: keep this in sync with the submodules hard-coded in bootstrap/lib.rs
+        submodules = [
+            "src/tools/rust-installer",
+            "src/tools/cargo",
+            "src/tools/rls",
+            "src/tools/miri",
+            "library/backtrace",
+            "library/stdarch"
+        ]
         filtered_submodules = []
         submodules_names = []
-        llvm_checked_out = os.path.exists(os.path.join(self.rust_root, "src/llvm-project/.git"))
-        external_llvm_provided = self.get_toml('llvm-config') or self.downloading_llvm()
-        llvm_needed = not self.get_toml('codegen-backends', 'rust') \
-            or "llvm" in self.get_toml('codegen-backends', 'rust')
         for module in submodules:
-            if module.endswith("llvm-project"):
-                # Don't sync the llvm-project submodule if an external LLVM was
-                # provided, if we are downloading LLVM or if the LLVM backend is
-                # not being built. Also, if the submodule has been initialized
-                # already, sync it anyways so that it doesn't mess up contributor
-                # pull requests.
-                if external_llvm_provided or not llvm_needed:
-                    if self.get_toml('lld') != 'true' and not llvm_checked_out:
-                        continue
             check = self.check_submodule(module, slow_submodules)
             filtered_submodules.append((module, check))
             submodules_names.append(module)
         recorded = subprocess.Popen(["git", "ls-tree", "HEAD"] + submodules_names,
                                     cwd=self.rust_root, stdout=subprocess.PIPE)
         recorded = recorded.communicate()[0].decode(default_encoding).strip().splitlines()
+        # { filename: hash }
         recorded_submodules = {}
         for data in recorded:
+            # [mode, kind, hash, filename]
             data = data.split()
             recorded_submodules[data[3]] = data[2]
         for module in filtered_submodules:
             self.update_submodule(module[0], module[1], recorded_submodules)
         print("Submodules updated in %.2f seconds" % (time() - start_time))
 
-    def set_normal_environment(self):
+    def set_dist_environment(self, url):
         """Set download URL for normal environment"""
         if 'RUSTUP_DIST_SERVER' in os.environ:
             self._download_url = os.environ['RUSTUP_DIST_SERVER']
         else:
-            self._download_url = 'https://static.rust-lang.org'
-
-    def set_dev_environment(self):
-        """Set download URL for development environment"""
-        if 'RUSTUP_DEV_DIST_SERVER' in os.environ:
-            self._download_url = os.environ['RUSTUP_DEV_DIST_SERVER']
-        else:
-            self._download_url = 'https://dev-static.rust-lang.org'
+            self._download_url = url
 
     def check_vendored_status(self):
         """Check that vendoring is configured properly"""
@@ -1119,30 +1166,22 @@ def bootstrap(help_triggered):
     build_dir = build.get_toml('build-dir', 'build') or 'build'
     build.build_dir = os.path.abspath(build_dir.replace("$ROOT", build.rust_root))
 
-    data = stage0_data(build.rust_root)
-    build.date = data['date']
-    build.rustc_channel = data['rustc']
+    with open(os.path.join(build.rust_root, "src", "stage0.json")) as f:
+        data = json.load(f)
+    build.checksums_sha256 = data["checksums_sha256"]
+    build.stage0_compiler = Stage0Toolchain(data["compiler"])
+    if data.get("rustfmt") is not None:
+        build.stage0_rustfmt = Stage0Toolchain(data["rustfmt"])
 
-    if "rustfmt" in data:
-        build.rustfmt_channel = data['rustfmt']
-
-    if 'dev' in data:
-        build.set_dev_environment()
-    else:
-        build.set_normal_environment()
+    build.set_dist_environment(data["dist_server"])
 
     build.build = args.build or build.build_triple()
     build.update_submodules()
 
     # Fetch/build the bootstrap
-    build.rustc_commit = build.maybe_download_rustc()
-    if build.rustc_commit is not None:
-        if build.verbose:
-            commit = build.rustc_commit
-            print("using downloaded stage1 artifacts from CI (commit {})".format(commit))
-        # FIXME: support downloading artifacts from the beta channel
-        build.rustc_channel = "nightly"
-    build.download_stage0()
+    build.download_toolchain()
+    # Download the master compiler if `download-rustc` is set
+    build.maybe_download_ci_toolchain()
     sys.stdout.flush()
     build.ensure_vendored()
     build.build_bootstrap()
@@ -1158,7 +1197,9 @@ def bootstrap(help_triggered):
     env["RUSTC_BOOTSTRAP"] = '1'
     if toml_path:
         env["BOOTSTRAP_CONFIG"] = toml_path
-    run(args, env=env, verbose=build.verbose)
+    if build.rustc_commit is not None:
+        env["BOOTSTRAP_DOWNLOAD_RUSTC"] = '1'
+    run(args, env=env, verbose=build.verbose, is_bootstrap=True)
 
 
 def main():

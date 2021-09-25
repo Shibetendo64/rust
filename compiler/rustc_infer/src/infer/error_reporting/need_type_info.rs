@@ -51,7 +51,7 @@ impl<'a, 'tcx> FindHirNodeVisitor<'a, 'tcx> {
 
     fn node_ty_contains_target(&self, hir_id: HirId) -> Option<Ty<'tcx>> {
         self.node_type_opt(hir_id).map(|ty| self.infcx.resolve_vars_if_possible(ty)).filter(|ty| {
-            ty.walk().any(|inner| {
+            ty.walk(self.infcx.tcx).any(|inner| {
                 inner == self.target
                     || match (inner.unpack(), self.target.unpack()) {
                         (GenericArgKind::Type(inner_ty), GenericArgKind::Type(target_ty)) => {
@@ -287,6 +287,7 @@ pub struct InferenceDiagnosticsData {
 pub struct InferenceDiagnosticsParentData {
     pub prefix: &'static str,
     pub name: String,
+    pub def_id: DefId,
 }
 
 pub enum UnderspecifiedArgKind {
@@ -328,6 +329,7 @@ impl InferenceDiagnosticsParentData {
         Some(InferenceDiagnosticsParentData {
             prefix: tcx.def_kind(parent_def_id).descr(parent_def_id),
             name: parent_name,
+            def_id: parent_def_id,
         })
     }
 }
@@ -489,11 +491,8 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             span
         };
 
-        let is_named_and_not_impl_trait = |ty: Ty<'_>| {
-            &ty.to_string() != "_" &&
-                // FIXME: Remove this check after `impl_trait_in_bindings` is stabilized. #63527
-                (!ty.is_impl_trait() || self.tcx.features().impl_trait_in_bindings)
-        };
+        let is_named_and_not_impl_trait =
+            |ty: Ty<'_>| &ty.to_string() != "_" && !ty.is_impl_trait();
 
         let ty_msg = match (local_visitor.found_node_ty, local_visitor.found_exact_method_call) {
             (_, Some(_)) => String::new(),
@@ -754,12 +753,18 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             if let (UnderspecifiedArgKind::Const { .. }, Some(parent_data)) =
                 (&arg_data.kind, &arg_data.parent)
             {
-                err.span_suggestion_verbose(
-                    span,
-                    "consider specifying the const argument",
-                    format!("{}::<{}>", parent_data.name, arg_data.name),
-                    Applicability::MaybeIncorrect,
-                );
+                // (#83606): Do not emit a suggestion if the parent has an `impl Trait`
+                // as an argument otherwise it will cause the E0282 error.
+                if !self.tcx.generics_of(parent_data.def_id).has_impl_trait()
+                    || self.tcx.features().explicit_generic_args_with_impl_trait
+                {
+                    err.span_suggestion_verbose(
+                        span,
+                        "consider specifying the const argument",
+                        format!("{}::<{}>", parent_data.name, arg_data.name),
+                        Applicability::MaybeIncorrect,
+                    );
+                }
             }
 
             err.span_label(
@@ -797,7 +802,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             let borrow = typeck_results.borrow();
             if let Some((DefKind::AssocFn, did)) = borrow.type_dependent_def(e.hir_id) {
                 let generics = self.tcx.generics_of(did);
-                if !generics.params.is_empty() {
+                if !generics.params.is_empty() && !generics.has_impl_trait() {
                     err.span_suggestion_verbose(
                         segment.ident.span.shrink_to_hi(),
                         &format!(

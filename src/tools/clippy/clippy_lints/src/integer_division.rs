@@ -1,19 +1,19 @@
-use crate::utils::span_lint_and_help;
+use clippy_utils::diagnostics::span_lint_and_help;
 use if_chain::if_chain;
 use rustc_hir as hir;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for division of integers
+    /// ### What it does
+    /// Checks for division of integers
     ///
-    /// **Why is this bad?** When outside of some very specific algorithms,
+    /// ### Why is this bad?
+    /// When outside of some very specific algorithms,
     /// integer division is very often a mistake because it discards the
     /// remainder.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// // Bad
     /// let x = 3 / 2;

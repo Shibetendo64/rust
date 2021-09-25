@@ -1,4 +1,5 @@
-use crate::utils::{is_expn_of, match_panic_call, span_lint};
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::{is_expn_of, match_panic_call};
 use if_chain::if_chain;
 use rustc_hir::Expr;
 use rustc_lint::{LateContext, LateLintPass};
@@ -6,13 +7,13 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::Span;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `panic!`.
+    /// ### What it does
+    /// Checks for usage of `panic!`.
     ///
-    /// **Why is this bad?** `panic!` will stop the execution of the executable
+    /// ### Why is this bad?
+    /// `panic!` will stop the execution of the executable
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```no_run
     /// panic!("even with a good reason");
     /// ```
@@ -22,13 +23,13 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `unimplemented!`.
+    /// ### What it does
+    /// Checks for usage of `unimplemented!`.
     ///
-    /// **Why is this bad?** This macro should not be present in production code
+    /// ### Why is this bad?
+    /// This macro should not be present in production code
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```no_run
     /// unimplemented!();
     /// ```
@@ -38,13 +39,13 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `todo!`.
+    /// ### What it does
+    /// Checks for usage of `todo!`.
     ///
-    /// **Why is this bad?** This macro should not be present in production code
+    /// ### Why is this bad?
+    /// This macro should not be present in production code
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```no_run
     /// todo!();
     /// ```
@@ -54,13 +55,13 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `unreachable!`.
+    /// ### What it does
+    /// Checks for usage of `unreachable!`.
     ///
-    /// **Why is this bad?** This macro can cause code to panic
+    /// ### Why is this bad?
+    /// This macro can cause code to panic
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```no_run
     /// unreachable!();
     /// ```
@@ -73,7 +74,9 @@ declare_lint_pass!(PanicUnimplemented => [UNIMPLEMENTED, UNREACHABLE, TODO, PANI
 
 impl<'tcx> LateLintPass<'tcx> for PanicUnimplemented {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if match_panic_call(cx, expr).is_some() {
+        if match_panic_call(cx, expr).is_some()
+            && (is_expn_of(expr.span, "debug_assert").is_none() && is_expn_of(expr.span, "assert").is_none())
+        {
             let span = get_outer_span(expr);
             if is_expn_of(expr.span, "unimplemented").is_some() {
                 span_lint(
@@ -96,11 +99,10 @@ impl<'tcx> LateLintPass<'tcx> for PanicUnimplemented {
 fn get_outer_span(expr: &Expr<'_>) -> Span {
     if_chain! {
         if expr.span.from_expansion();
-        let first = expr.span.ctxt().outer_expn_data();
-        if first.call_site.from_expansion();
-        let second = first.call_site.ctxt().outer_expn_data();
+        let first = expr.span.ctxt().outer_expn_data().call_site;
+        if first.from_expansion();
         then {
-            second.call_site
+            first.ctxt().outer_expn_data().call_site
         } else {
             expr.span
         }

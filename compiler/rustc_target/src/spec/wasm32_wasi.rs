@@ -72,11 +72,11 @@
 //! best we can with this target. Don't start relying on too much here unless
 //! you know what you're getting in to!
 
-use super::wasm32_base;
+use super::wasm_base;
 use super::{crt_objects, LinkerFlavor, LldFlavor, Target};
 
 pub fn target() -> Target {
-    let mut options = wasm32_base::options();
+    let mut options = wasm_base::options();
 
     options.os = "wasi".to_string();
     options.linker_flavor = LinkerFlavor::Lld(LldFlavor::Wasm);
@@ -109,7 +109,7 @@ pub fn target() -> Target {
     Target {
         llvm_target: "wasm32-wasi".to_string(),
         pointer_width: 32,
-        data_layout: "e-m:e-p:32:32-i64:64-n32:64-S128".to_string(),
+        data_layout: "e-m:e-p:32:32-i64:64-n32:64-S128-ni:1:10:20".to_string(),
         arch: "wasm32".to_string(),
         options,
     }

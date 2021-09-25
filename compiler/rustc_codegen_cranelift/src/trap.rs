@@ -4,27 +4,24 @@ use crate::prelude::*;
 
 fn codegen_print(fx: &mut FunctionCx<'_, '_, '_>, msg: &str) {
     let puts = fx
-        .cx
         .module
         .declare_function(
             "puts",
             Linkage::Import,
             &Signature {
                 call_conv: CallConv::triple_default(fx.triple()),
-                params: vec![AbiParam::new(pointer_ty(fx.tcx))],
+                params: vec![AbiParam::new(fx.pointer_type)],
                 returns: vec![AbiParam::new(types::I32)],
             },
         )
         .unwrap();
-    let puts = fx.cx.module.declare_func_in_func(puts, &mut fx.bcx.func);
-    #[cfg(debug_assertions)]
-    {
+    let puts = fx.module.declare_func_in_func(puts, &mut fx.bcx.func);
+    if fx.clif_comments.enabled() {
         fx.add_comment(puts, "puts");
     }
 
-    let symbol_name = fx.tcx.symbol_name(fx.instance);
-    let real_msg = format!("trap at {:?} ({}): {}\0", fx.instance, symbol_name, msg);
-    let msg_ptr = fx.anonymous_str("trap", &real_msg);
+    let real_msg = format!("trap at {:?} ({}): {}\0", fx.instance, fx.symbol_name, msg);
+    let msg_ptr = fx.anonymous_str(&real_msg);
     fx.bcx.ins().call(puts, &[msg_ptr]);
 }
 

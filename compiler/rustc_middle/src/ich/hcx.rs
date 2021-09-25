@@ -1,9 +1,9 @@
 use crate::ich;
 use crate::middle::cstore::CrateStore;
-use crate::ty::{fast_reject, TyCtxt};
+use crate::ty::TyCtxt;
 
 use rustc_ast as ast;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::Lrc;
 use rustc_hir as hir;
@@ -12,12 +12,7 @@ use rustc_hir::definitions::{DefPathHash, Definitions};
 use rustc_session::Session;
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::Symbol;
-use rustc_span::{BytePos, CachingSourceMapView, SourceFile, SpanData};
-
-use rustc_span::def_id::{CrateNum, CRATE_DEF_INDEX};
-use smallvec::SmallVec;
-use std::cmp::Ord;
-use std::thread::LocalKey;
+use rustc_span::{BytePos, CachingSourceMapView, SourceFile, Span, SpanData};
 
 fn compute_ignored_attr_names() -> FxHashSet<Symbol> {
     debug_assert!(!ich::IGNORED_ATTRIBUTES.is_empty());
@@ -30,7 +25,6 @@ fn compute_ignored_attr_names() -> FxHashSet<Symbol> {
 /// things (e.g., each `DefId`/`DefPath` is only hashed once).
 #[derive(Clone)]
 pub struct StableHashingContext<'a> {
-    sess: &'a Session,
     definitions: &'a Definitions,
     cstore: &'a dyn CrateStore,
     pub(super) body_resolver: BodyResolver<'a>,
@@ -80,7 +74,6 @@ impl<'a> StableHashingContext<'a> {
             !always_ignore_spans && !sess.opts.debugging_opts.incremental_ignore_spans;
 
         StableHashingContext {
-            sess,
             body_resolver: BodyResolver(krate),
             definitions,
             cstore,
@@ -117,11 +110,6 @@ impl<'a> StableHashingContext<'a> {
     ) -> Self {
         let always_ignore_spans = true;
         Self::new_with_or_without_spans(sess, krate, definitions, cstore, always_ignore_spans)
-    }
-
-    #[inline]
-    pub fn sess(&self) -> &'a Session {
-        self.sess
     }
 
     #[inline]
@@ -232,22 +220,13 @@ impl<'a> rustc_span::HashStableContext for StableHashingContext<'a> {
     }
 
     #[inline]
-    fn hash_crate_num(&mut self, cnum: CrateNum, hasher: &mut StableHasher) {
-        let hcx = self;
-        hcx.def_path_hash(DefId { krate: cnum, index: CRATE_DEF_INDEX }).hash_stable(hcx, hasher);
+    fn def_path_hash(&self, def_id: DefId) -> DefPathHash {
+        self.def_path_hash(def_id)
     }
 
     #[inline]
-    fn hash_def_id(&mut self, def_id: DefId, hasher: &mut StableHasher) {
-        let hcx = self;
-        hcx.def_path_hash(def_id).hash_stable(hcx, hasher);
-    }
-
-    fn expn_id_cache() -> &'static LocalKey<rustc_span::ExpnIdCache> {
-        thread_local! {
-            static CACHE: rustc_span::ExpnIdCache = Default::default();
-        }
-        &CACHE
+    fn def_span(&self, def_id: LocalDefId) -> Span {
+        self.definitions.def_span(def_id)
     }
 
     fn span_data_to_lines_and_cols(
@@ -258,38 +237,4 @@ impl<'a> rustc_span::HashStableContext for StableHashingContext<'a> {
     }
 }
 
-pub fn hash_stable_trait_impls<'a>(
-    hcx: &mut StableHashingContext<'a>,
-    hasher: &mut StableHasher,
-    blanket_impls: &[DefId],
-    non_blanket_impls: &FxHashMap<fast_reject::SimplifiedType, Vec<DefId>>,
-) {
-    {
-        let mut blanket_impls: SmallVec<[_; 8]> =
-            blanket_impls.iter().map(|&def_id| hcx.def_path_hash(def_id)).collect();
-
-        if blanket_impls.len() > 1 {
-            blanket_impls.sort_unstable();
-        }
-
-        blanket_impls.hash_stable(hcx, hasher);
-    }
-
-    {
-        let mut keys: SmallVec<[_; 8]> =
-            non_blanket_impls.keys().map(|k| (k, k.map_def(|d| hcx.def_path_hash(d)))).collect();
-        keys.sort_unstable_by(|&(_, ref k1), &(_, ref k2)| k1.cmp(k2));
-        keys.len().hash_stable(hcx, hasher);
-        for (key, ref stable_key) in keys {
-            stable_key.hash_stable(hcx, hasher);
-            let mut impls: SmallVec<[_; 8]> =
-                non_blanket_impls[key].iter().map(|&impl_id| hcx.def_path_hash(impl_id)).collect();
-
-            if impls.len() > 1 {
-                impls.sort_unstable();
-            }
-
-            impls.hash_stable(hcx, hasher);
-        }
-    }
-}
+impl rustc_session::HashStableContext for StableHashingContext<'a> {}

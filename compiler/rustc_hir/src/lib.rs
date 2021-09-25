@@ -3,12 +3,9 @@
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/hir.html
 
 #![feature(crate_visibility_modifier)]
-#![feature(const_fn)] // For the unsizing cast on `&[]`
-#![feature(const_panic)]
-#![feature(extended_key_value_attributes)]
 #![feature(in_band_lifetimes)]
 #![feature(once_cell)]
-#![feature(or_patterns)]
+#![feature(min_specialization)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -19,6 +16,7 @@ extern crate rustc_data_structures;
 
 mod arena;
 pub mod def;
+pub mod def_path_hash_map;
 pub mod definitions;
 pub use rustc_span::def_id;
 mod hir;

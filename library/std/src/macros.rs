@@ -6,7 +6,7 @@
 
 #[doc = include_str!("../../core/src/macros/panic.md")]
 #[macro_export]
-#[rustc_builtin_macro = "std_panic"]
+#[rustc_builtin_macro(std_panic)]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow_internal_unstable(edition_panic)]
 #[cfg_attr(not(test), rustc_diagnostic_item = "std_panic_macro")]
@@ -185,9 +185,10 @@ macro_rules! eprintln {
 /// builds or when debugging in release mode is significantly faster.
 ///
 /// Note that the macro is intended as a debugging tool and therefore you
-/// should avoid having uses of it in version control for long periods.
-/// Use cases involving debug output that should be added to version control
-/// are better served by macros such as [`debug!`] from the [`log`] crate.
+/// should avoid having uses of it in version control for long periods
+/// (other than in tests and similar).
+/// Debug output from production code is better done with other facilities
+/// such as the [`debug!`] macro from the [`log`] crate.
 ///
 /// # Stability
 ///
@@ -288,7 +289,7 @@ macro_rules! dbg {
     // `$val` expression could be a block (`{ .. }`), in which case the `eprintln!`
     // will be malformed.
     () => {
-        $crate::eprintln!("[{}:{}]", $crate::file!(), $crate::line!());
+        $crate::eprintln!("[{}:{}]", $crate::file!(), $crate::line!())
     };
     ($val:expr $(,)?) => {
         // Use of `match` here is intentional because it affects the lifetimes

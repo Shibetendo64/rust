@@ -1,3 +1,4 @@
+use crate::mir;
 use crate::ty::fold::{TypeFoldable, TypeFolder};
 use crate::ty::{self, Ty, TyCtxt, TypeFlags};
 
@@ -20,7 +21,9 @@ impl<'tcx> TyCtxt<'tcx> {
         T: TypeFoldable<'tcx>,
     {
         // If there's nothing to erase avoid performing the query at all
-        if !value.has_type_flags(TypeFlags::HAS_RE_LATE_BOUND | TypeFlags::HAS_FREE_REGIONS) {
+        if !value
+            .has_type_flags(TypeFlags::HAS_RE_LATE_BOUND | TypeFlags::HAS_POTENTIAL_FREE_REGIONS)
+        {
             return value;
         }
         debug!("erase_regions({:?})", value);
@@ -43,7 +46,7 @@ impl TypeFolder<'tcx> for RegionEraserVisitor<'tcx> {
         if ty.needs_infer() { ty.super_fold_with(self) } else { self.tcx.erase_regions_ty(ty) }
     }
 
-    fn fold_binder<T>(&mut self, t: ty::Binder<T>) -> ty::Binder<T>
+    fn fold_binder<T>(&mut self, t: ty::Binder<'tcx, T>) -> ty::Binder<'tcx, T>
     where
         T: TypeFoldable<'tcx>,
     {
@@ -64,5 +67,9 @@ impl TypeFolder<'tcx> for RegionEraserVisitor<'tcx> {
             ty::ReLateBound(..) => r,
             _ => self.tcx.lifetimes.re_erased,
         }
+    }
+
+    fn fold_mir_const(&mut self, c: mir::ConstantKind<'tcx>) -> mir::ConstantKind<'tcx> {
+        c.super_fold_with(self)
     }
 }

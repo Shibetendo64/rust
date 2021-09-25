@@ -1,7 +1,8 @@
-use crate::utils::{
-    differing_macro_contexts, get_parent_expr, get_trait_def_id, implements_trait, paths,
-    snippet_block_with_applicability, span_lint, span_lint_and_sugg,
-};
+use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
+use clippy_utils::higher;
+use clippy_utils::source::snippet_block_with_applicability;
+use clippy_utils::ty::implements_trait;
+use clippy_utils::{differing_macro_contexts, get_parent_expr};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::{walk_expr, NestedVisitorMap, Visitor};
@@ -10,16 +11,17 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::hir::map::Map;
 use rustc_middle::lint::in_external_macro;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `if` conditions that use blocks containing an
+    /// ### What it does
+    /// Checks for `if` conditions that use blocks containing an
     /// expression, statements or conditions that use closures with blocks.
     ///
-    /// **Why is this bad?** Style, using blocks in the condition makes it hard to read.
+    /// ### Why is this bad?
+    /// Style, using blocks in the condition makes it hard to read.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Examples:**
+    /// ### Examples
     /// ```rust
     /// // Bad
     /// if { true } { /* ... */ }
@@ -59,9 +61,9 @@ impl<'a, 'tcx> Visitor<'tcx> for ExVisitor<'a, 'tcx> {
             // do not lint if the closure is called using an iterator (see #1141)
             if_chain! {
                 if let Some(parent) = get_parent_expr(self.cx, expr);
-                if let ExprKind::MethodCall(_, _, args, _) = parent.kind;
-                let caller = self.cx.typeck_results().expr_ty(&args[0]);
-                if let Some(iter_id) = get_trait_def_id(self.cx, &paths::ITERATOR);
+                if let ExprKind::MethodCall(_, _, [self_arg, ..], _) = &parent.kind;
+                let caller = self.cx.typeck_results().expr_ty(self_arg);
+                if let Some(iter_id) = self.cx.tcx.get_diagnostic_item(sym::Iterator);
                 if implements_trait(self.cx, caller, iter_id, &[]);
                 then {
                     return;
@@ -91,7 +93,7 @@ impl<'tcx> LateLintPass<'tcx> for BlocksInIfConditions {
         if in_external_macro(cx.sess(), expr.span) {
             return;
         }
-        if let ExprKind::If(cond, _, _) = &expr.kind {
+        if let Some(higher::If { cond, .. }) = higher::If::hir(expr) {
             if let ExprKind::Block(block, _) = &cond.kind {
                 if block.rules == BlockCheckMode::DefaultBlock {
                     if block.stmts.is_empty() {

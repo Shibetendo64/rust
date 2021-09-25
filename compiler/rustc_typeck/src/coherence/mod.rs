@@ -6,7 +6,7 @@
 // mappings. That mapping code resides here.
 
 use rustc_errors::struct_span_err;
-use rustc_hir::def_id::{DefId, LocalDefId, LOCAL_CRATE};
+use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, TyCtxt, TypeFoldable};
 use rustc_span::Span;
@@ -195,7 +195,7 @@ fn coherent_trait(tcx: TyCtxt<'_>, def_id: DefId) {
 }
 
 pub fn check_coherence(tcx: TyCtxt<'_>) {
-    for &trait_def_id in tcx.hir().krate().trait_impls.keys() {
+    for &trait_def_id in tcx.all_local_trait_impls(()).keys() {
         tcx.ensure().coherent_trait(trait_def_id);
     }
 
@@ -203,8 +203,8 @@ pub fn check_coherence(tcx: TyCtxt<'_>) {
     tcx.sess.time("orphan_checking", || orphan::check(tcx));
 
     // these queries are executed for side-effects (error reporting):
-    tcx.ensure().crate_inherent_impls(LOCAL_CRATE);
-    tcx.ensure().crate_inherent_impls_overlap_check(LOCAL_CRATE);
+    tcx.ensure().crate_inherent_impls(());
+    tcx.ensure().crate_inherent_impls_overlap_check(());
 }
 
 /// Checks whether an impl overlaps with the automatic `impl Trait for dyn Trait`.

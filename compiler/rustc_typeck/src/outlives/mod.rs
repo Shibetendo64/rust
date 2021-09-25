@@ -1,6 +1,6 @@
 use hir::Node;
 use rustc_hir as hir;
-use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
+use rustc_hir::def_id::DefId;
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::{self, CratePredicatesMap, ToPredicate, TyCtxt};
@@ -20,10 +20,31 @@ pub fn provide(providers: &mut Providers) {
 fn inferred_outlives_of(tcx: TyCtxt<'_>, item_def_id: DefId) -> &[(ty::Predicate<'_>, Span)] {
     let id = tcx.hir().local_def_id_to_hir_id(item_def_id.expect_local());
 
+    if matches!(tcx.def_kind(item_def_id), hir::def::DefKind::AnonConst) && tcx.lazy_normalization()
+    {
+        if let Some(_) = tcx.hir().opt_const_param_default_param_hir_id(id) {
+            // In `generics_of` we set the generics' parent to be our parent's parent which means that
+            // we lose out on the predicates of our actual parent if we dont return those predicates here.
+            // (See comment in `generics_of` for more information on why the parent shenanigans is necessary)
+            //
+            // struct Foo<'a, 'b, const N: usize = { ... }>(&'a &'b ());
+            //        ^^^                          ^^^^^^^ the def id we are calling
+            //        ^^^                                  inferred_outlives_of on
+            //        parent item we dont have set as the
+            //        parent of generics returned by `generics_of`
+            //
+            // In the above code we want the anon const to have predicates in its param env for `'b: 'a`
+            let item_id = tcx.hir().get_parent_item(id);
+            let item_def_id = tcx.hir().local_def_id(item_id).to_def_id();
+            // In the above code example we would be calling `inferred_outlives_of(Foo)` here
+            return tcx.inferred_outlives_of(item_def_id);
+        }
+    }
+
     match tcx.hir().get(id) {
         Node::Item(item) => match item.kind {
             hir::ItemKind::Struct(..) | hir::ItemKind::Enum(..) | hir::ItemKind::Union(..) => {
-                let crate_map = tcx.inferred_outlives_crate(LOCAL_CRATE);
+                let crate_map = tcx.inferred_outlives_crate(());
 
                 let predicates = crate_map.predicates.get(&item_def_id).copied().unwrap_or(&[]);
 
@@ -58,9 +79,7 @@ fn inferred_outlives_of(tcx: TyCtxt<'_>, item_def_id: DefId) -> &[(ty::Predicate
     }
 }
 
-fn inferred_outlives_crate(tcx: TyCtxt<'_>, crate_num: CrateNum) -> CratePredicatesMap<'_> {
-    assert_eq!(crate_num, LOCAL_CRATE);
-
+fn inferred_outlives_crate(tcx: TyCtxt<'_>, (): ()) -> CratePredicatesMap<'_> {
     // Compute a map from each struct/enum/union S to the **explicit**
     // outlives predicates (`T: 'a`, `'a: 'b`) that the user wrote.
     // Typically there won't be many of these, except in older code where
@@ -85,13 +104,15 @@ fn inferred_outlives_crate(tcx: TyCtxt<'_>, crate_num: CrateNum) -> CratePredica
                 |(ty::OutlivesPredicate(kind1, region2), &span)| {
                     match kind1.unpack() {
                         GenericArgKind::Type(ty1) => Some((
-                            ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(ty1, region2))
-                                .to_predicate(tcx),
+                            ty::Binder::dummy(ty::PredicateKind::TypeOutlives(
+                                ty::OutlivesPredicate(ty1, region2),
+                            ))
+                            .to_predicate(tcx),
                             span,
                         )),
                         GenericArgKind::Lifetime(region1) => Some((
-                            ty::PredicateKind::RegionOutlives(ty::OutlivesPredicate(
-                                region1, region2,
+                            ty::Binder::dummy(ty::PredicateKind::RegionOutlives(
+                                ty::OutlivesPredicate(region1, region2),
                             ))
                             .to_predicate(tcx),
                             span,

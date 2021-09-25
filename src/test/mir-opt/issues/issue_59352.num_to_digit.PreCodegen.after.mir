@@ -43,27 +43,27 @@ fn num_to_digit(_1: char) -> u32 {
     }
 
     bb1: {
-        StorageDead(_11);                // scope 0 at $DIR/issue-59352.rs:14:5: 14:63
+        StorageDead(_11);                // scope 0 at $DIR/issue-59352.rs:14:8: 14:23
         StorageLive(_3);                 // scope 0 at $DIR/issue-59352.rs:14:26: 14:41
         StorageLive(_4);                 // scope 0 at $DIR/issue-59352.rs:14:26: 14:29
         _4 = _1;                         // scope 0 at $DIR/issue-59352.rs:14:26: 14:29
-        _3 = char::methods::<impl char>::to_digit(move _4, const 8_u32) -> bb3; // scope 0 at $DIR/issue-59352.rs:14:26: 14:41
+        _3 = char::methods::<impl char>::to_digit(move _4, const 8_u32) -> bb2; // scope 0 at $DIR/issue-59352.rs:14:26: 14:41
                                          // mir::Constant
                                          // + span: $DIR/issue-59352.rs:14:30: 14:38
                                          // + literal: Const { ty: fn(char, u32) -> std::option::Option<u32> {std::char::methods::<impl char>::to_digit}, val: Value(Scalar(<ZST>)) }
     }
 
     bb2: {
-        StorageDead(_11);                // scope 0 at $DIR/issue-59352.rs:14:5: 14:63
-        _0 = const 0_u32;                // scope 0 at $DIR/issue-59352.rs:14:60: 14:61
-        goto -> bb4;                     // scope 0 at $DIR/issue-59352.rs:14:5: 14:63
-    }
-
-    bb3: {
         StorageDead(_4);                 // scope 0 at $DIR/issue-59352.rs:14:40: 14:41
         StorageLive(_10);                // scope 0 at $DIR/issue-59352.rs:14:26: 14:50
         _10 = discriminant(_3);          // scope 3 at $DIR/issue-59352.rs:14:26: 14:50
         switchInt(move _10) -> [0_isize: bb6, 1_isize: bb8, otherwise: bb7]; // scope 3 at $DIR/issue-59352.rs:14:26: 14:50
+    }
+
+    bb3: {
+        StorageDead(_11);                // scope 0 at $DIR/issue-59352.rs:14:8: 14:23
+        _0 = const 0_u32;                // scope 0 at $DIR/issue-59352.rs:14:60: 14:61
+        goto -> bb4;                     // scope 0 at $DIR/issue-59352.rs:14:5: 14:63
     }
 
     bb4: {
@@ -82,7 +82,7 @@ fn num_to_digit(_1: char) -> u32 {
         StorageDead(_7);                 // scope 1 at $DIR/issue-59352.rs:14:8: 14:23
         StorageDead(_5);                 // scope 0 at $DIR/issue-59352.rs:14:8: 14:23
         StorageDead(_2);                 // scope 0 at $DIR/issue-59352.rs:14:22: 14:23
-        switchInt(move _11) -> [1_isize: bb1, otherwise: bb2]; // scope 0 at $DIR/issue-59352.rs:14:5: 14:63
+        switchInt(move _11) -> [1_isize: bb1, otherwise: bb3]; // scope 0 at $DIR/issue-59352.rs:14:8: 14:23
     }
 
     bb6: {
@@ -92,10 +92,10 @@ fn num_to_digit(_1: char) -> u32 {
                                          // + literal: Const { ty: fn(&'static str) -> ! {core::panicking::panic}, val: Value(Scalar(<ZST>)) }
                                          // ty::Const
                                          // + ty: &str
-                                         // + val: Value(Slice { data: Allocation { bytes: [99, 97, 108, 108, 101, 100, 32, 96, 79, 112, 116, 105, 111, 110, 58, 58, 117, 110, 119, 114, 97, 112, 40, 41, 96, 32, 111, 110, 32, 97, 32, 96, 78, 111, 110, 101, 96, 32, 118, 97, 108, 117, 101], relocations: Relocations(SortedMap { data: [] }), init_mask: InitMask { blocks: [8796093022207], len: Size { raw: 43 } }, size: Size { raw: 43 }, align: Align { pow2: 0 }, mutability: Not, extra: () }, start: 0, end: 43 })
+                                         // + val: Value(Slice { data: Allocation { bytes: [99, 97, 108, 108, 101, 100, 32, 96, 79, 112, 116, 105, 111, 110, 58, 58, 117, 110, 119, 114, 97, 112, 40, 41, 96, 32, 111, 110, 32, 97, 32, 96, 78, 111, 110, 101, 96, 32, 118, 97, 108, 117, 101], relocations: Relocations(SortedMap { data: [] }), init_mask: InitMask { blocks: [8796093022207], len: Size { raw: 43 } }, align: Align { pow2: 0 }, mutability: Not, extra: () }, start: 0, end: 43 })
                                          // mir::Constant
                                          // + span: $DIR/issue-59352.rs:14:26: 14:50
-                                         // + literal: Const { ty: &str, val: Value(Slice { data: Allocation { bytes: [99, 97, 108, 108, 101, 100, 32, 96, 79, 112, 116, 105, 111, 110, 58, 58, 117, 110, 119, 114, 97, 112, 40, 41, 96, 32, 111, 110, 32, 97, 32, 96, 78, 111, 110, 101, 96, 32, 118, 97, 108, 117, 101], relocations: Relocations(SortedMap { data: [] }), init_mask: InitMask { blocks: [8796093022207], len: Size { raw: 43 } }, size: Size { raw: 43 }, align: Align { pow2: 0 }, mutability: Not, extra: () }, start: 0, end: 43 }) }
+                                         // + literal: Const { ty: &str, val: Value(Slice { data: Allocation { bytes: [99, 97, 108, 108, 101, 100, 32, 96, 79, 112, 116, 105, 111, 110, 58, 58, 117, 110, 119, 114, 97, 112, 40, 41, 96, 32, 111, 110, 32, 97, 32, 96, 78, 111, 110, 101, 96, 32, 118, 97, 108, 117, 101], relocations: Relocations(SortedMap { data: [] }), init_mask: InitMask { blocks: [8796093022207], len: Size { raw: 43 } }, align: Align { pow2: 0 }, mutability: Not, extra: () }, start: 0, end: 43 }) }
     }
 
     bb7: {

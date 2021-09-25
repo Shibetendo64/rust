@@ -1,21 +1,20 @@
+use clippy_utils::consts::{constant_simple, Constant};
+use clippy_utils::diagnostics::span_lint;
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::Span;
 
-use crate::consts::{constant_simple, Constant};
-use crate::utils::span_lint;
-
 declare_clippy_lint! {
-    /// **What it does:** Checks for erasing operations, e.g., `x * 0`.
+    /// ### What it does
+    /// Checks for erasing operations, e.g., `x * 0`.
     ///
-    /// **Why is this bad?** The whole expression can be replaced by zero.
+    /// ### Why is this bad?
+    /// The whole expression can be replaced by zero.
     /// This is most likely not the intended outcome and should probably be
     /// corrected
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let x = 1;
     /// 0 / x;
@@ -34,7 +33,7 @@ impl<'tcx> LateLintPass<'tcx> for ErasingOp {
         if e.span.from_expansion() {
             return;
         }
-        if let ExprKind::Binary(ref cmp, ref left, ref right) = e.kind {
+        if let ExprKind::Binary(ref cmp, left, right) = e.kind {
             match cmp.node {
                 BinOpKind::Mul | BinOpKind::BitAnd => {
                     check(cx, left, e.span);

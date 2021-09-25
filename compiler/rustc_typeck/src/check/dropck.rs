@@ -77,7 +77,7 @@ fn ensure_drop_params_and_item_params_correspond<'tcx>(
     tcx.infer_ctxt().enter(|ref infcx| {
         let impl_param_env = tcx.param_env(self_type_did);
         let tcx = infcx.tcx;
-        let mut fulfillment_cx = TraitEngine::new(tcx);
+        let mut fulfillment_cx = <dyn TraitEngine<'_>>::new(tcx);
 
         let named_type = tcx.type_of(self_type_did);
 
@@ -218,9 +218,9 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
 
         // This closure is a more robust way to check `Predicate` equality
         // than simple `==` checks (which were the previous implementation).
-        // It relies on `ty::relate` for `TraitPredicate` and `ProjectionPredicate`
-        // (which implement the Relate trait), while delegating on simple equality
-        // for the other `Predicate`.
+        // It relies on `ty::relate` for `TraitPredicate`, `ProjectionPredicate`,
+        // `ConstEvaluatable` and `TypeOutlives` (which implement the Relate trait),
+        // while delegating on simple equality for the other `Predicate`.
         // This implementation solves (Issue #59497) and (Issue #58311).
         // It is unclear to me at the moment whether the approach based on `relate`
         // could be extended easily also to the other `Predicate`.
@@ -229,11 +229,18 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
             let predicate = predicate.kind();
             let p = p.kind();
             match (predicate.skip_binder(), p.skip_binder()) {
-                (ty::PredicateKind::Trait(a, _), ty::PredicateKind::Trait(b, _)) => {
+                (ty::PredicateKind::Trait(a), ty::PredicateKind::Trait(b)) => {
                     relator.relate(predicate.rebind(a), p.rebind(b)).is_ok()
                 }
                 (ty::PredicateKind::Projection(a), ty::PredicateKind::Projection(b)) => {
                     relator.relate(predicate.rebind(a), p.rebind(b)).is_ok()
+                }
+                (
+                    ty::PredicateKind::ConstEvaluatable(a),
+                    ty::PredicateKind::ConstEvaluatable(b),
+                ) => tcx.try_unify_abstract_consts((a, b)),
+                (ty::PredicateKind::TypeOutlives(a), ty::PredicateKind::TypeOutlives(b)) => {
+                    relator.relate(predicate.rebind(a.0), p.rebind(b.0)).is_ok()
                 }
                 _ => predicate == p,
             }
@@ -310,6 +317,7 @@ impl TypeRelation<'tcx> for SimpleEqRelation<'tcx> {
     fn relate_with_variance<T: Relate<'tcx>>(
         &mut self,
         _: ty::Variance,
+        _info: ty::VarianceDiagInfo<'tcx>,
         a: T,
         b: T,
     ) -> RelateResult<'tcx, T> {
@@ -354,9 +362,9 @@ impl TypeRelation<'tcx> for SimpleEqRelation<'tcx> {
 
     fn binders<T>(
         &mut self,
-        a: ty::Binder<T>,
-        b: ty::Binder<T>,
-    ) -> RelateResult<'tcx, ty::Binder<T>>
+        a: ty::Binder<'tcx, T>,
+        b: ty::Binder<'tcx, T>,
+    ) -> RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
         T: Relate<'tcx>,
     {

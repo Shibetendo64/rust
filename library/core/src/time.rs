@@ -2,14 +2,21 @@
 
 //! Temporal quantification.
 //!
-//! Example:
+//! # Examples:
+//!
+//! There are multiple ways to create a new [`Duration`]:
 //!
 //! ```
-//! use std::time::Duration;
+//! # use std::time::Duration;
+//! let five_seconds = Duration::from_secs(5);
+//! assert_eq!(five_seconds, Duration::from_millis(5_000));
+//! assert_eq!(five_seconds, Duration::from_micros(5_000_000));
+//! assert_eq!(five_seconds, Duration::from_nanos(5_000_000_000));
 //!
-//! let five_seconds = Duration::new(5, 0);
-//! // both declarations are equivalent
-//! assert_eq!(Duration::new(5, 0), Duration::from_secs(5));
+//! let ten_seconds = Duration::from_secs(10);
+//! let seven_nanos = Duration::from_nanos(7);
+//! let total = ten_seconds + seven_nanos;
+//! assert_eq!(total, Duration::new(10, 7));
 //! ```
 
 use crate::fmt;
@@ -61,6 +68,7 @@ const MICROS_PER_SEC: u64 = 1_000_000;
 /// crate to do so.
 #[stable(feature = "duration", since = "1.3.0")]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(not(test), rustc_diagnostic_item = "Duration")]
 pub struct Duration {
     secs: u64,
     nanos: u32, // Always 0 <= nanos < NANOS_PER_SEC
@@ -124,29 +132,32 @@ impl Duration {
     /// # Examples
     ///
     /// ```
-    /// #![feature(duration_zero)]
     /// use std::time::Duration;
     ///
     /// let duration = Duration::ZERO;
     /// assert!(duration.is_zero());
     /// assert_eq!(duration.as_nanos(), 0);
     /// ```
-    #[unstable(feature = "duration_zero", issue = "73544")]
+    #[stable(feature = "duration_zero", since = "1.53.0")]
     pub const ZERO: Duration = Duration::from_nanos(0);
 
     /// The maximum duration.
     ///
-    /// It is roughly equal to a duration of 584,942,417,355 years.
+    /// May vary by platform as necessary. Must be able to contain the difference between
+    /// two instances of [`Instant`] or two instances of [`SystemTime`].
+    /// This constraint gives it a value of about 584,942,417,355 years in practice,
+    /// which is currently used on all platforms.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(duration_constants)]
     /// use std::time::Duration;
     ///
     /// assert_eq!(Duration::MAX, Duration::new(u64::MAX, 1_000_000_000 - 1));
     /// ```
-    #[unstable(feature = "duration_constants", issue = "57391")]
+    /// [`Instant`]: ../../std/time/struct.Instant.html
+    /// [`SystemTime`]: ../../std/time/struct.SystemTime.html
+    #[stable(feature = "duration_saturating_ops", since = "1.53.0")]
     pub const MAX: Duration = Duration::new(u64::MAX, NANOS_PER_SEC - 1);
 
     /// Creates a new `Duration` from the specified number of whole seconds and
@@ -269,7 +280,6 @@ impl Duration {
     /// # Examples
     ///
     /// ```
-    /// #![feature(duration_zero)]
     /// use std::time::Duration;
     ///
     /// assert!(Duration::ZERO.is_zero());
@@ -281,7 +291,8 @@ impl Duration {
     /// assert!(!Duration::from_nanos(1).is_zero());
     /// assert!(!Duration::from_secs(1).is_zero());
     /// ```
-    #[unstable(feature = "duration_zero", issue = "73544")]
+    #[stable(feature = "duration_zero", since = "1.53.0")]
+    #[rustc_const_stable(feature = "duration_zero", since = "1.53.0")]
     #[inline]
     pub const fn is_zero(&self) -> bool {
         self.secs == 0 && self.nanos == 0
@@ -479,14 +490,13 @@ impl Duration {
     /// # Examples
     ///
     /// ```
-    /// #![feature(duration_saturating_ops)]
     /// #![feature(duration_constants)]
     /// use std::time::Duration;
     ///
     /// assert_eq!(Duration::new(0, 0).saturating_add(Duration::new(0, 1)), Duration::new(0, 1));
     /// assert_eq!(Duration::new(1, 0).saturating_add(Duration::new(u64::MAX, 0)), Duration::MAX);
     /// ```
-    #[unstable(feature = "duration_saturating_ops", issue = "76416")]
+    #[stable(feature = "duration_saturating_ops", since = "1.53.0")]
     #[inline]
     #[rustc_const_unstable(feature = "duration_consts_2", issue = "72440")]
     pub const fn saturating_add(self, rhs: Duration) -> Duration {
@@ -516,13 +526,11 @@ impl Duration {
         if let Some(mut secs) = self.secs.checked_sub(rhs.secs) {
             let nanos = if self.nanos >= rhs.nanos {
                 self.nanos - rhs.nanos
+            } else if let Some(sub_secs) = secs.checked_sub(1) {
+                secs = sub_secs;
+                self.nanos + NANOS_PER_SEC - rhs.nanos
             } else {
-                if let Some(sub_secs) = secs.checked_sub(1) {
-                    secs = sub_secs;
-                    self.nanos + NANOS_PER_SEC - rhs.nanos
-                } else {
-                    return None;
-                }
+                return None;
             };
             debug_assert!(nanos < NANOS_PER_SEC);
             Some(Duration { secs, nanos })
@@ -537,14 +545,12 @@ impl Duration {
     /// # Examples
     ///
     /// ```
-    /// #![feature(duration_saturating_ops)]
-    /// #![feature(duration_zero)]
     /// use std::time::Duration;
     ///
     /// assert_eq!(Duration::new(0, 1).saturating_sub(Duration::new(0, 0)), Duration::new(0, 1));
     /// assert_eq!(Duration::new(0, 0).saturating_sub(Duration::new(0, 1)), Duration::ZERO);
     /// ```
-    #[unstable(feature = "duration_saturating_ops", issue = "76416")]
+    #[stable(feature = "duration_saturating_ops", since = "1.53.0")]
     #[inline]
     #[rustc_const_unstable(feature = "duration_consts_2", issue = "72440")]
     pub const fn saturating_sub(self, rhs: Duration) -> Duration {
@@ -590,14 +596,13 @@ impl Duration {
     /// # Examples
     ///
     /// ```
-    /// #![feature(duration_saturating_ops)]
     /// #![feature(duration_constants)]
     /// use std::time::Duration;
     ///
     /// assert_eq!(Duration::new(0, 500_000_001).saturating_mul(2), Duration::new(1, 2));
     /// assert_eq!(Duration::new(u64::MAX - 1, 0).saturating_mul(2), Duration::MAX);
     /// ```
-    #[unstable(feature = "duration_saturating_ops", issue = "76416")]
+    #[stable(feature = "duration_saturating_ops", since = "1.53.0")]
     #[inline]
     #[rustc_const_unstable(feature = "duration_consts_2", issue = "72440")]
     pub const fn saturating_mul(self, rhs: u32) -> Duration {
@@ -690,21 +695,47 @@ impl Duration {
     #[inline]
     #[rustc_const_unstable(feature = "duration_consts_2", issue = "72440")]
     pub const fn from_secs_f64(secs: f64) -> Duration {
+        match Duration::try_from_secs_f64(secs) {
+            Ok(v) => v,
+            Err(e) => crate::panicking::panic(e.description()),
+        }
+    }
+
+    /// The checked version of [`from_secs_f64`].
+    ///
+    /// [`from_secs_f64`]: Duration::from_secs_f64
+    ///
+    /// This constructor will return an `Err` if `secs` is not finite, negative or overflows `Duration`.
+    ///
+    /// # Examples
+    /// ```
+    /// #![feature(duration_checked_float)]
+    ///
+    /// use std::time::Duration;
+    ///
+    /// let dur = Duration::try_from_secs_f64(2.7);
+    /// assert_eq!(dur, Ok(Duration::new(2, 700_000_000)));
+    ///
+    /// let negative = Duration::try_from_secs_f64(-5.0);
+    /// assert!(negative.is_err());
+    /// ```
+    #[unstable(feature = "duration_checked_float", issue = "83400")]
+    #[inline]
+    pub const fn try_from_secs_f64(secs: f64) -> Result<Duration, FromSecsError> {
         const MAX_NANOS_F64: f64 = ((u64::MAX as u128 + 1) * (NANOS_PER_SEC as u128)) as f64;
         let nanos = secs * (NANOS_PER_SEC as f64);
         if !nanos.is_finite() {
-            panic!("got non-finite value when converting float to duration");
-        }
-        if nanos >= MAX_NANOS_F64 {
-            panic!("overflow when converting float to duration");
-        }
-        if nanos < 0.0 {
-            panic!("underflow when converting float to duration");
-        }
-        let nanos = nanos as u128;
-        Duration {
-            secs: (nanos / (NANOS_PER_SEC as u128)) as u64,
-            nanos: (nanos % (NANOS_PER_SEC as u128)) as u32,
+            Err(FromSecsError { kind: FromSecsErrorKind::NonFinite })
+        } else if nanos >= MAX_NANOS_F64 {
+            Err(FromSecsError { kind: FromSecsErrorKind::Overflow })
+        } else if nanos < 0.0 {
+            Err(FromSecsError { kind: FromSecsErrorKind::Underflow })
+        } else {
+            let nanos = nanos as u128;
+            Ok(Duration {
+                secs: (nanos / (NANOS_PER_SEC as u128)) as u64,
+                nanos: (nanos % (NANOS_PER_SEC as u128)) as u32,
+            })
         }
     }
 
@@ -725,21 +756,47 @@ impl Duration {
     #[inline]
     #[rustc_const_unstable(feature = "duration_consts_2", issue = "72440")]
     pub const fn from_secs_f32(secs: f32) -> Duration {
+        match Duration::try_from_secs_f32(secs) {
+            Ok(v) => v,
+            Err(e) => crate::panicking::panic(e.description()),
+        }
+    }
+
+    /// The checked version of [`from_secs_f32`].
+    ///
+    /// [`from_secs_f32`]: Duration::from_secs_f32
+    ///
+    /// This constructor will return an `Err` if `secs` is not finite, negative or overflows `Duration`.
+    ///
+    /// # Examples
+    /// ```
+    /// #![feature(duration_checked_float)]
+    ///
+    /// use std::time::Duration;
+    ///
+    /// let dur = Duration::try_from_secs_f32(2.7);
+    /// assert_eq!(dur, Ok(Duration::new(2, 700_000_000)));
+    ///
+    /// let negative = Duration::try_from_secs_f32(-5.0);
+    /// assert!(negative.is_err());
+    /// ```
+    #[unstable(feature = "duration_checked_float", issue = "83400")]
+    #[inline]
+    pub const fn try_from_secs_f32(secs: f32) -> Result<Duration, FromSecsError> {
         const MAX_NANOS_F32: f32 = ((u64::MAX as u128 + 1) * (NANOS_PER_SEC as u128)) as f32;
         let nanos = secs * (NANOS_PER_SEC as f32);
         if !nanos.is_finite() {
-            panic!("got non-finite value when converting float to duration");
-        }
-        if nanos >= MAX_NANOS_F32 {
-            panic!("overflow when converting float to duration");
-        }
-        if nanos < 0.0 {
-            panic!("underflow when converting float to duration");
-        }
-        let nanos = nanos as u128;
-        Duration {
-            secs: (nanos / (NANOS_PER_SEC as u128)) as u64,
-            nanos: (nanos % (NANOS_PER_SEC as u128)) as u32,
+            Err(FromSecsError { kind: FromSecsErrorKind::NonFinite })
+        } else if nanos >= MAX_NANOS_F32 {
+            Err(FromSecsError { kind: FromSecsErrorKind::Overflow })
+        } else if nanos < 0.0 {
+            Err(FromSecsError { kind: FromSecsErrorKind::Underflow })
+        } else {
+            let nanos = nanos as u128;
+            Ok(Duration {
+                secs: (nanos / (NANOS_PER_SEC as u128)) as u64,
+                nanos: (nanos % (NANOS_PER_SEC as u128)) as u32,
+            })
         }
     }
 
@@ -992,11 +1049,16 @@ impl fmt::Debug for Duration {
         /// `divisor` must not be above 100_000_000. It also should be a power
         /// of 10, everything else doesn't make sense. `fractional_part` has
         /// to be less than `10 * divisor`!
+        ///
+        /// A prefix and postfix may be added. The whole thing is padded
+        /// to the formatter's `width`, if specified.
         fn fmt_decimal(
             f: &mut fmt::Formatter<'_>,
             mut integer_part: u64,
             mut fractional_part: u32,
             mut divisor: u32,
+            prefix: &str,
+            postfix: &str,
         ) -> fmt::Result {
             // Encode the fractional part into a temporary buffer. The buffer
             // only need to hold 9 elements, because `fractional_part` has to
@@ -1057,48 +1119,143 @@ impl fmt::Debug for Duration {
             // set, we only use all digits up to the last non-zero one.
             let end = f.precision().map(|p| crate::cmp::min(p, 9)).unwrap_or(pos);
 
-            // If we haven't emitted a single fractional digit and the precision
-            // wasn't set to a non-zero value, we don't print the decimal point.
-            if end == 0 {
-                write!(f, "{}", integer_part)
-            } else {
-                // SAFETY: We are only writing ASCII digits into the buffer and it was
-                // initialized with '0's, so it contains valid UTF8.
-                let s = unsafe { crate::str::from_utf8_unchecked(&buf[..end]) };
+            // This closure emits the formatted duration without emitting any
+            // padding (padding is calculated below).
+            let emit_without_padding = |f: &mut fmt::Formatter<'_>| {
+                write!(f, "{}{}", prefix, integer_part)?;
 
-                // If the user request a precision > 9, we pad '0's at the end.
-                let w = f.precision().unwrap_or(pos);
-                write!(f, "{}.{:0<width$}", integer_part, s, width = w)
+                // Write the decimal point and the fractional part (if any).
+                if end > 0 {
+                    // SAFETY: We are only writing ASCII digits into the buffer and
+                    // it was initialized with '0's, so it contains valid UTF8.
+                    let s = unsafe { crate::str::from_utf8_unchecked(&buf[..end]) };
+
+                    // If the user request a precision > 9, we pad '0's at the end.
+                    let w = f.precision().unwrap_or(pos);
+                    write!(f, ".{:0<width$}", s, width = w)?;
+                }
+
+                write!(f, "{}", postfix)
+            };
+
+            match f.width() {
+                None => {
+                    // No `width` specified. There's no need to calculate the
+                    // length of the output in this case, just emit it.
+                    emit_without_padding(f)
+                }
+                Some(requested_w) => {
+                    // A `width` was specified. Calculate the actual width of
+                    // the output in order to calculate the required padding.
+                    // It consists of 4 parts:
+                    // 1. The prefix: is either "+" or "", so we can just use len().
+                    // 2. The postfix: can be "µs" so we have to count UTF8 characters.
+                    let mut actual_w = prefix.len() + postfix.chars().count();
+                    // 3. The integer part:
+                    if let Some(log) = integer_part.checked_log10() {
+                        // integer_part is > 0, so has length log10(x)+1
+                        actual_w += 1 + log as usize;
+                    } else {
+                        // integer_part is 0, so has length 1.
+                        actual_w += 1;
+                    }
+                    // 4. The fractional part (if any):
+                    if end > 0 {
+                        let frac_part_w = f.precision().unwrap_or(pos);
+                        actual_w += 1 + frac_part_w;
+                    }
+
+                    if requested_w <= actual_w {
+                        // Output is already longer than `width`, so don't pad.
+                        emit_without_padding(f)
+                    } else {
+                        // We need to add padding. Use the `Formatter::padding` helper function.
+                        let default_align = crate::fmt::rt::v1::Alignment::Left;
+                        let post_padding = f.padding(requested_w - actual_w, default_align)?;
+                        emit_without_padding(f)?;
+                        post_padding.write(f)
+                    }
+                }
             }
         }
 
         // Print leading '+' sign if requested
-        if f.sign_plus() {
-            write!(f, "+")?;
-        }
+        let prefix = if f.sign_plus() { "+" } else { "" };
 
         if self.secs > 0 {
-            fmt_decimal(f, self.secs, self.nanos, NANOS_PER_SEC / 10)?;
-            f.write_str("s")
+            fmt_decimal(f, self.secs, self.nanos, NANOS_PER_SEC / 10, prefix, "s")
         } else if self.nanos >= NANOS_PER_MILLI {
             fmt_decimal(
                 f,
                 (self.nanos / NANOS_PER_MILLI) as u64,
                 self.nanos % NANOS_PER_MILLI,
                 NANOS_PER_MILLI / 10,
-            )?;
-            f.write_str("ms")
+                prefix,
+                "ms",
+            )
         } else if self.nanos >= NANOS_PER_MICRO {
             fmt_decimal(
                 f,
                 (self.nanos / NANOS_PER_MICRO) as u64,
                 self.nanos % NANOS_PER_MICRO,
                 NANOS_PER_MICRO / 10,
-            )?;
-            f.write_str("µs")
+                prefix,
+                "µs",
+            )
         } else {
-            fmt_decimal(f, self.nanos as u64, 0, 1)?;
-            f.write_str("ns")
+            fmt_decimal(f, self.nanos as u64, 0, 1, prefix, "ns")
         }
     }
+}
+
+/// An error which can be returned when converting a floating-point value of seconds
+/// into a [`Duration`].
+///
+/// This error is used as the error type for [`Duration::try_from_secs_f32`] and
+/// [`Duration::try_from_secs_f64`].
+///
+/// # Example
+///
+/// ```
+/// #![feature(duration_checked_float)]
+///
+/// use std::time::Duration;
+///
+/// if let Err(e) = Duration::try_from_secs_f32(-1.0) {
+///     println!("Failed conversion to Duration: {}", e);
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[unstable(feature = "duration_checked_float", issue = "83400")]
+pub struct FromSecsError {
+    kind: FromSecsErrorKind,
+}
+
+impl FromSecsError {
+    const fn description(&self) -> &'static str {
+        match self.kind {
+            FromSecsErrorKind::NonFinite => {
+                "got non-finite value when converting float to duration"
+            }
+            FromSecsErrorKind::Overflow => "overflow when converting float to duration",
+            FromSecsErrorKind::Underflow => "underflow when converting float to duration",
+        }
+    }
+}
+
+#[unstable(feature = "duration_checked_float", issue = "83400")]
+impl fmt::Display for FromSecsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.description(), f)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FromSecsErrorKind {
+    // Value is not a finite value (either infinity or NaN).
+    NonFinite,
+    // Value is too large to store in a `Duration`.
+    Overflow,
+    // Value is less than `0.0`.
+    Underflow,
 }

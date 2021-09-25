@@ -1,28 +1,31 @@
 //! lint when there is a large size difference between variants on an enum
 
-use crate::utils::{snippet_opt, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::source::snippet_opt;
 use rustc_errors::Applicability;
 use rustc_hir::{Item, ItemKind, VariantData};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::lint::in_external_macro;
+use rustc_middle::ty::layout::LayoutOf;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_target::abi::LayoutOf;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for large size differences between variants on
+    /// ### What it does
+    /// Checks for large size differences between variants on
     /// `enum`s.
     ///
-    /// **Why is this bad?** Enum size is bounded by the largest variant. Having a
+    /// ### Why is this bad?
+    /// Enum size is bounded by the largest variant. Having a
     /// large variant can penalize the memory layout of that enum.
     ///
-    /// **Known problems:** This lint obviously cannot take the distribution of
+    /// ### Known problems
+    /// This lint obviously cannot take the distribution of
     /// variants in your running program into account. It is possible that the
     /// smaller variants make up less than 1% of all instances, in which case
     /// the overhead is negligible and the boxing is counter-productive. Always
     /// measure the change this lint suggests.
     ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// // Bad
     /// enum Test {
@@ -112,7 +115,7 @@ impl<'tcx> LateLintPass<'tcx> for LargeEnumVariant {
                             );
                             if variant.fields.len() == 1 {
                                 let span = match def.variants[i].data {
-                                    VariantData::Struct(ref fields, ..) | VariantData::Tuple(ref fields, ..) => {
+                                    VariantData::Struct(fields, ..) | VariantData::Tuple(fields, ..) => {
                                         fields[0].ty.span
                                     },
                                     VariantData::Unit(..) => unreachable!(),

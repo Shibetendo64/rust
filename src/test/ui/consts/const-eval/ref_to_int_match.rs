@@ -1,4 +1,4 @@
-#![feature(const_fn_union)]
+// stderr-per-bitwidth
 
 fn main() {
     let n: Int = 40;

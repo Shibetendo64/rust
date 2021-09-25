@@ -1,7 +1,7 @@
-use crate::utils::{
-    ast_utils::is_useless_with_eq_exprs, eq_expr_value, higher, implements_trait, in_macro, is_copy, is_expn_of,
-    multispan_sugg, snippet, span_lint, span_lint_and_then,
-};
+use clippy_utils::diagnostics::{multispan_sugg, span_lint, span_lint_and_then};
+use clippy_utils::source::snippet;
+use clippy_utils::ty::{implements_trait, is_copy};
+use clippy_utils::{ast_utils::is_useless_with_eq_exprs, eq_expr_value, higher, in_macro, is_expn_of};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, StmtKind};
@@ -9,18 +9,21 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for equal operands to comparison, logical and
+    /// ### What it does
+    /// Checks for equal operands to comparison, logical and
     /// bitwise, difference and division binary operators (`==`, `>`, etc., `&&`,
     /// `||`, `&`, `|`, `^`, `-` and `/`).
     ///
-    /// **Why is this bad?** This is usually just a typo or a copy and paste error.
+    /// ### Why is this bad?
+    /// This is usually just a typo or a copy and paste error.
     ///
-    /// **Known problems:** False negatives: We had some false positives regarding
+    /// ### Known problems
+    /// False negatives: We had some false positives regarding
     /// calls (notably [racer](https://github.com/phildawes/racer) had one instance
     /// of `x.pop() && x.pop()`), so we removed matching any function or method
     /// calls. We may introduce a list of known pure functions in the future.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let x = 1;
     /// if x + 1 == x + 1 {}
@@ -37,15 +40,18 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for arguments to `==` which have their address
+    /// ### What it does
+    /// Checks for arguments to `==` which have their address
     /// taken to satisfy a bound
     /// and suggests to dereference the other argument instead
     ///
-    /// **Why is this bad?** It is more idiomatic to dereference the other argument.
+    /// ### Why is this bad?
+    /// It is more idiomatic to dereference the other argument.
     ///
-    /// **Known problems:** None
+    /// ### Known problems
+    /// None
     ///
-    /// **Example:**
+    /// ### Example
     /// ```ignore
     /// // Bad
     /// &x == y
@@ -65,12 +71,12 @@ const ASSERT_MACRO_NAMES: [&str; 4] = ["assert_eq", "assert_ne", "debug_assert_e
 impl<'tcx> LateLintPass<'tcx> for EqOp {
     #[allow(clippy::similar_names, clippy::too_many_lines)]
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
-        if let ExprKind::Block(ref block, _) = e.kind {
+        if let ExprKind::Block(block, _) = e.kind {
             for stmt in block.stmts {
                 for amn in &ASSERT_MACRO_NAMES {
                     if_chain! {
                         if is_expn_of(stmt.span, amn).is_some();
-                        if let StmtKind::Semi(ref matchexpr) = stmt.kind;
+                        if let StmtKind::Semi(matchexpr) = stmt.kind;
                         if let Some(macro_args) = higher::extract_assert_macro_args(matchexpr);
                         if macro_args.len() == 2;
                         let (lhs, rhs) = (macro_args[0], macro_args[1]);
@@ -88,12 +94,12 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
                 }
             }
         }
-        if let ExprKind::Binary(op, ref left, ref right) = e.kind {
+        if let ExprKind::Binary(op, left, right) = e.kind {
             if e.span.from_expansion() {
                 return;
             }
             let macro_with_not_op = |expr_kind: &ExprKind<'_>| {
-                if let ExprKind::Unary(_, ref expr) = *expr_kind {
+                if let ExprKind::Unary(_, expr) = *expr_kind {
                     in_macro(expr.span)
                 } else {
                     false
@@ -102,7 +108,7 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
             if macro_with_not_op(&left.kind) || macro_with_not_op(&right.kind) {
                 return;
             }
-            if is_useless_with_eq_exprs(higher::binop(op.node)) && eq_expr_value(cx, left, right) {
+            if is_useless_with_eq_exprs(op.node.into()) && eq_expr_value(cx, left, right) {
                 span_lint(
                     cx,
                     EQ_OP,
@@ -135,7 +141,7 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
                     // do not suggest to dereference literals
                     (&ExprKind::Lit(..), _) | (_, &ExprKind::Lit(..)) => {},
                     // &foo == &bar
-                    (&ExprKind::AddrOf(BorrowKind::Ref, _, ref l), &ExprKind::AddrOf(BorrowKind::Ref, _, ref r)) => {
+                    (&ExprKind::AddrOf(BorrowKind::Ref, _, l), &ExprKind::AddrOf(BorrowKind::Ref, _, r)) => {
                         let lty = cx.typeck_results().expr_ty(l);
                         let rty = cx.typeck_results().expr_ty(r);
                         let lcpy = is_copy(cx, lty);
@@ -156,7 +162,7 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
                                         vec![(left.span, lsnip), (right.span, rsnip)],
                                     );
                                 },
-                            )
+                            );
                         } else if lcpy
                             && !rcpy
                             && implements_trait(cx, lty, trait_id, &[cx.typeck_results().expr_ty(right).into()])
@@ -175,7 +181,7 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
                                         Applicability::MaybeIncorrect, // FIXME #2597
                                     );
                                 },
-                            )
+                            );
                         } else if !lcpy
                             && rcpy
                             && implements_trait(cx, cx.typeck_results().expr_ty(left), trait_id, &[rty.into()])
@@ -194,11 +200,11 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
                                         Applicability::MaybeIncorrect, // FIXME #2597
                                     );
                                 },
-                            )
+                            );
                         }
                     },
                     // &foo == bar
-                    (&ExprKind::AddrOf(BorrowKind::Ref, _, ref l), _) => {
+                    (&ExprKind::AddrOf(BorrowKind::Ref, _, l), _) => {
                         let lty = cx.typeck_results().expr_ty(l);
                         let lcpy = is_copy(cx, lty);
                         if (requires_ref || lcpy)
@@ -218,11 +224,11 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
                                         Applicability::MaybeIncorrect, // FIXME #2597
                                     );
                                 },
-                            )
+                            );
                         }
                     },
                     // foo == &bar
-                    (_, &ExprKind::AddrOf(BorrowKind::Ref, _, ref r)) => {
+                    (_, &ExprKind::AddrOf(BorrowKind::Ref, _, r)) => {
                         let rty = cx.typeck_results().expr_ty(r);
                         let rcpy = is_copy(cx, rty);
                         if (requires_ref || rcpy)
@@ -236,7 +242,7 @@ impl<'tcx> LateLintPass<'tcx> for EqOp {
                                     rsnip,
                                     Applicability::MaybeIncorrect, // FIXME #2597
                                 );
-                            })
+                            });
                         }
                     },
                     _ => {},

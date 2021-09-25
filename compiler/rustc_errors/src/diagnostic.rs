@@ -9,9 +9,10 @@ use rustc_lint_defs::Applicability;
 use rustc_serialize::json::Json;
 use rustc_span::{MultiSpan, Span, DUMMY_SP};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 #[must_use]
-#[derive(Clone, Debug, PartialEq, Hash, Encodable, Decodable)]
+#[derive(Clone, Debug, Encodable, Decodable)]
 pub struct Diagnostic {
     pub level: Level,
     pub message: Vec<(String, Style)>,
@@ -24,12 +25,16 @@ pub struct Diagnostic {
     /// as a sort key to sort a buffer of diagnostics.  By default, it is the primary span of
     /// `span` if there is one.  Otherwise, it is `DUMMY_SP`.
     pub sort_span: Span,
+
+    /// If diagnostic is from Lint, custom hash function ignores notes
+    /// otherwise hash is based on the all the fields
+    pub is_lint: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Encodable, Decodable)]
 pub enum DiagnosticId {
     Error(String),
-    Lint { name: String, has_future_breakage: bool },
+    Lint { name: String, has_future_breakage: bool, is_force_warn: bool },
 }
 
 /// A "sub"-diagnostic attached to a parent diagnostic.
@@ -103,6 +108,7 @@ impl Diagnostic {
             children: vec![],
             suggestions: vec![],
             sort_span: DUMMY_SP,
+            is_lint: false,
         }
     }
 
@@ -117,6 +123,13 @@ impl Diagnostic {
     pub fn has_future_breakage(&self) -> bool {
         match self.code {
             Some(DiagnosticId::Lint { has_future_breakage, .. }) => has_future_breakage,
+            _ => false,
+        }
+    }
+
+    pub fn is_force_warn(&self) -> bool {
+        match self.code {
+            Some(DiagnosticId::Lint { is_force_warn, .. }) => is_force_warn,
             _ => false,
         }
     }
@@ -156,7 +169,7 @@ impl Diagnostic {
         self
     }
 
-    pub fn note_expected_found(
+    crate fn note_expected_found(
         &mut self,
         expected_label: &dyn fmt::Display,
         expected: DiagnosticStyledString,
@@ -166,7 +179,7 @@ impl Diagnostic {
         self.note_expected_found_extra(expected_label, expected, found_label, found, &"", &"")
     }
 
-    pub fn note_unsuccessful_coercion(
+    crate fn note_unsuccessful_coercion(
         &mut self,
         expected: DiagnosticStyledString,
         found: DiagnosticStyledString,
@@ -256,33 +269,33 @@ impl Diagnostic {
 
     /// Prints the span with a note above it.
     /// This is like [`Diagnostic::note()`], but it gets its own span.
-    pub fn span_note<S: Into<MultiSpan>>(&mut self, sp: S, msg: &str) -> &mut Self {
+    crate fn span_note<S: Into<MultiSpan>>(&mut self, sp: S, msg: &str) -> &mut Self {
         self.sub(Level::Note, msg, sp.into(), None);
         self
     }
 
     /// Add a warning attached to this diagnostic.
-    pub fn warn(&mut self, msg: &str) -> &mut Self {
+    crate fn warn(&mut self, msg: &str) -> &mut Self {
         self.sub(Level::Warning, msg, MultiSpan::new(), None);
         self
     }
 
     /// Prints the span with a warning above it.
     /// This is like [`Diagnostic::warn()`], but it gets its own span.
-    pub fn span_warn<S: Into<MultiSpan>>(&mut self, sp: S, msg: &str) -> &mut Self {
+    crate fn span_warn<S: Into<MultiSpan>>(&mut self, sp: S, msg: &str) -> &mut Self {
         self.sub(Level::Warning, msg, sp.into(), None);
         self
     }
 
     /// Add a help message attached to this diagnostic.
-    pub fn help(&mut self, msg: &str) -> &mut Self {
+    crate fn help(&mut self, msg: &str) -> &mut Self {
         self.sub(Level::Help, msg, MultiSpan::new(), None);
         self
     }
 
     /// Prints the span with some help above it.
     /// This is like [`Diagnostic::help()`], but it gets its own span.
-    pub fn span_help<S: Into<MultiSpan>>(&mut self, sp: S, msg: &str) -> &mut Self {
+    crate fn span_help<S: Into<MultiSpan>>(&mut self, sp: S, msg: &str) -> &mut Self {
         self.sub(Level::Help, msg, sp.into(), None);
         self
     }
@@ -295,6 +308,37 @@ impl Diagnostic {
         suggestion: Vec<(Span, String)>,
         applicability: Applicability,
     ) -> &mut Self {
+        self.multipart_suggestion_with_style(
+            msg,
+            suggestion,
+            applicability,
+            SuggestionStyle::ShowCode,
+        )
+    }
+
+    /// Show a suggestion that has multiple parts to it, always as it's own subdiagnostic.
+    /// In other words, multiple changes need to be applied as part of this suggestion.
+    pub fn multipart_suggestion_verbose(
+        &mut self,
+        msg: &str,
+        suggestion: Vec<(Span, String)>,
+        applicability: Applicability,
+    ) -> &mut Self {
+        self.multipart_suggestion_with_style(
+            msg,
+            suggestion,
+            applicability,
+            SuggestionStyle::ShowAlways,
+        )
+    }
+    /// [`Diagnostic::multipart_suggestion()`] but you can set the [`SuggestionStyle`].
+    pub fn multipart_suggestion_with_style(
+        &mut self,
+        msg: &str,
+        suggestion: Vec<(Span, String)>,
+        applicability: Applicability,
+        style: SuggestionStyle,
+    ) -> &mut Self {
         assert!(!suggestion.is_empty());
         self.suggestions.push(CodeSuggestion {
             substitutions: vec![Substitution {
@@ -304,37 +348,7 @@ impl Diagnostic {
                     .collect(),
             }],
             msg: msg.to_owned(),
-            style: SuggestionStyle::ShowCode,
-            applicability,
-            tool_metadata: Default::default(),
-        });
-        self
-    }
-
-    /// Show multiple suggestions that have multiple parts.
-    /// See also [`Diagnostic::multipart_suggestion()`].
-    pub fn multipart_suggestions(
-        &mut self,
-        msg: &str,
-        suggestions: Vec<Vec<(Span, String)>>,
-        applicability: Applicability,
-    ) -> &mut Self {
-        assert!(!suggestions.is_empty());
-        for s in &suggestions {
-            assert!(!s.is_empty());
-        }
-        self.suggestions.push(CodeSuggestion {
-            substitutions: suggestions
-                .into_iter()
-                .map(|suggestion| Substitution {
-                    parts: suggestion
-                        .into_iter()
-                        .map(|(span, snippet)| SubstitutionPart { snippet, span })
-                        .collect(),
-                })
-                .collect(),
-            msg: msg.to_owned(),
-            style: SuggestionStyle::ShowCode,
+            style,
             applicability,
             tool_metadata: Default::default(),
         });
@@ -463,6 +477,30 @@ impl Diagnostic {
         self
     }
 
+    /// Prints out a message with multiple suggested edits of the code.
+    /// See also [`Diagnostic::span_suggestion()`].
+    pub fn multipart_suggestions(
+        &mut self,
+        msg: &str,
+        suggestions: impl Iterator<Item = Vec<(Span, String)>>,
+        applicability: Applicability,
+    ) -> &mut Self {
+        self.suggestions.push(CodeSuggestion {
+            substitutions: suggestions
+                .map(|sugg| Substitution {
+                    parts: sugg
+                        .into_iter()
+                        .map(|(span, snippet)| SubstitutionPart { snippet, span })
+                        .collect(),
+                })
+                .collect(),
+            msg: msg.to_owned(),
+            style: SuggestionStyle::ShowCode,
+            applicability,
+            tool_metadata: Default::default(),
+        });
+        self
+    }
     /// Prints out a message with a suggested edit of the code. If the suggestion is presented
     /// inline, it will only show the message and not the suggestion.
     ///
@@ -553,6 +591,11 @@ impl Diagnostic {
         self
     }
 
+    pub fn set_is_lint(&mut self) -> &mut Self {
+        self.is_lint = true;
+        self
+    }
+
     pub fn code(&mut self, s: DiagnosticId) -> &mut Self {
         self.code = Some(s);
         self
@@ -567,7 +610,7 @@ impl Diagnostic {
         self.code.clone()
     }
 
-    pub fn set_primary_message<M: Into<String>>(&mut self, msg: M) -> &mut Self {
+    crate fn set_primary_message<M: Into<String>>(&mut self, msg: M) -> &mut Self {
         self.message[0] = (msg.into(), Style::NoStyle);
         self
     }
@@ -582,6 +625,8 @@ impl Diagnostic {
 
     /// Convenience function for internal use, clients should use one of the
     /// public methods above.
+    ///
+    /// Used by `proc_macro_server` for implementing `server::Diagnostic`.
     pub fn sub(
         &mut self,
         level: Level,
@@ -609,6 +654,42 @@ impl Diagnostic {
     ) {
         let sub = SubDiagnostic { level, message, span, render_span };
         self.children.push(sub);
+    }
+
+    /// Fields used for Hash, and PartialEq trait
+    fn keys(
+        &self,
+    ) -> (
+        &Level,
+        &Vec<(String, Style)>,
+        &Option<DiagnosticId>,
+        &MultiSpan,
+        &Vec<CodeSuggestion>,
+        Option<&Vec<SubDiagnostic>>,
+    ) {
+        (
+            &self.level,
+            &self.message,
+            &self.code,
+            &self.span,
+            &self.suggestions,
+            (if self.is_lint { None } else { Some(&self.children) }),
+        )
+    }
+}
+
+impl Hash for Diagnostic {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        self.keys().hash(state);
+    }
+}
+
+impl PartialEq for Diagnostic {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys() == other.keys()
     }
 }
 

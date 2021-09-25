@@ -26,16 +26,19 @@ Inline assembly is currently supported on the following architectures:
 - AArch64
 - RISC-V
 - NVPTX
+- PowerPC
 - Hexagon
 - MIPS32r2 and MIPS64r2
 - wasm32
+- BPF
+- SPIR-V
 
 ## Basic usage
 
 Let us start with the simplest possible example:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 unsafe {
     asm!("nop");
 }
@@ -52,7 +55,7 @@ Now inserting an instruction that does nothing is rather boring. Let us do somet
 actually acts on data:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let x: u64;
 unsafe {
     asm!("mov {}, 5", out(reg) x);
@@ -74,7 +77,7 @@ the template and will read the variable from there after the inline assembly fin
 Let us see another example that also uses an input:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let i: u64 = 3;
 let o: u64;
 unsafe {
@@ -114,7 +117,7 @@ readability, and allows reordering instructions without changing the argument or
 We can further refine the above example to avoid the `mov` instruction:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let mut x: u64 = 3;
 unsafe {
     asm!("add {0}, {number}", inout(reg) x, number = const 5);
@@ -128,7 +131,7 @@ This is different from specifying an input and output separately in that it is g
 It is also possible to specify different variables for the input and output parts of an `inout` operand:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let x: u64 = 3;
 let y: u64;
 unsafe {
@@ -150,7 +153,7 @@ There is also a `inlateout` variant of this specifier.
 Here is an example where `inlateout` *cannot* be used:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let mut a: u64 = 4;
 let b: u64 = 4;
 let c: u64 = 4;
@@ -171,7 +174,7 @@ Here the compiler is free to allocate the same register for inputs `b` and `c` s
 However the following example can use `inlateout` since the output is only modified after all input registers have been read:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let mut a: u64 = 4;
 let b: u64 = 4;
 unsafe {
@@ -186,27 +189,24 @@ As you can see, this assembly fragment will still work correctly if `a` and `b` 
 
 Some instructions require that the operands be in a specific register.
 Therefore, Rust inline assembly provides some more specific constraint specifiers.
-While `reg` is generally available on any architecture, these are highly architecture specific. E.g. for x86 the general purpose registers `eax`, `ebx`, `ecx`, `edx`, `ebp`, `esi`, and `edi`
-among others can be addressed by their name.
+While `reg` is generally available on any architecture, explicit registers are highly architecture specific. E.g. for x86 the general purpose registers `eax`, `ebx`, `ecx`, `edx`, `ebp`, `esi`, and `edi` among others can be addressed by their name.
 
 ```rust,allow_fail,no_run
-# #![feature(asm)]
+#![feature(asm)]
 let cmd = 0xd1;
 unsafe {
     asm!("out 0x64, eax", in("eax") cmd);
 }
 ```
 
-In this example we call the `out` instruction to output the content of the `cmd` variable
-to port `0x64`. Since the `out` instruction only accepts `eax` (and its sub registers) as operand
-we had to use the `eax` constraint specifier.
+In this example we call the `out` instruction to output the content of the `cmd` variable to port `0x64`. Since the `out` instruction only accepts `eax` (and its sub registers) as operand we had to use the `eax` constraint specifier.
 
-Note that unlike other operand types, explicit register operands cannot be used in the template string: you can't use `{}` and should write the register name directly instead. Also, they must appear at the end of the operand list after all other operand types.
+> **Note**: unlike other operand types, explicit register operands cannot be used in the template string: you can't use `{}` and should write the register name directly instead. Also, they must appear at the end of the operand list after all other operand types.
 
 Consider this example which uses the x86 `mul` instruction:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 fn mul(a: u64, b: u64) -> u128 {
     let lo: u64;
     let hi: u64;
@@ -235,14 +235,12 @@ The higher 64 bits are stored in `rdx` from which we fill the variable `hi`.
 ## Clobbered registers
 
 In many cases inline assembly will modify state that is not needed as an output.
-Usually this is either because we have to use a scratch register in the assembly,
-or instructions modify state that we don't need to further examine.
+Usually this is either because we have to use a scratch register in the assembly or because instructions modify state that we don't need to further examine.
 This state is generally referred to as being "clobbered".
-We need to tell the compiler about this since it may need to save and restore this state
-around the inline assembly block.
+We need to tell the compiler about this since it may need to save and restore this state around the inline assembly block.
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let ebx: u32;
 let ecx: u32;
 
@@ -272,7 +270,7 @@ However we still need to tell the compiler that `eax` and `edx` have been modifi
 This can also be used with a general register class (e.g. `reg`) to obtain a scratch register for use inside the asm code:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 // Multiply x by 6 using shifts and adds
 let mut x: u64 = 4;
 unsafe {
@@ -288,38 +286,40 @@ unsafe {
 assert_eq!(x, 4 * 6);
 ```
 
-## Symbol operands
+## Symbol operands and ABI clobbers
 
 A special operand type, `sym`, allows you to use the symbol name of a `fn` or `static` in inline assembly code.
 This allows you to call a function or access a global variable without needing to keep its address in a register.
 
 ```rust,allow_fail
-# #![feature(asm)]
-extern "C" fn foo(arg: i32) {
+#![feature(asm)]
+extern "C" fn foo(arg: i32) -> i32 {
     println!("arg = {}", arg);
+    arg * 2
 }
 
-fn call_foo(arg: i32) {
+fn call_foo(arg: i32) -> i32 {
     unsafe {
+        let result;
         asm!(
             "call {}",
             sym foo,
-            // 1st argument in rdi, which is caller-saved
-            inout("rdi") arg => _,
-            // All caller-saved registers must be marked as clobberred
-            out("rax") _, out("rcx") _, out("rdx") _, out("rsi") _,
-            out("r8") _, out("r9") _, out("r10") _, out("r11") _,
-            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
-            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
-            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
-            out("xmm12") _, out("xmm13") _, out("xmm14") _, out("xmm15") _,
-        )
+            // 1st argument in rdi
+            in("rdi") arg,
+            // Return value in rax
+            out("rax") result,
+            // Mark all registers which are not preserved by the "C" calling
+            // convention as clobbered.
+            clobber_abi("C"),
+        );
+        result
     }
 }
 ```
 
-Note that the `fn` or `static` item does not need to be public or `#[no_mangle]`:
-the compiler will automatically insert the appropriate mangled symbol name into the assembly code.
+Note that the `fn` or `static` item does not need to be public or `#[no_mangle]`: the compiler will automatically insert the appropriate mangled symbol name into the assembly code.
+
+By default, `asm!` assumes that any register not specified as an output will have its contents preserved by the assembly code. The [`clobber_abi`](#abi-clobbers) argument to `asm!` tells the compiler to automatically insert the necessary clobber operands according to the given calling convention ABI: any register which is not fully preserved in that ABI will be treated as clobbered.
 
 ## Register template modifiers
 
@@ -330,7 +330,7 @@ By default the compiler will always choose the name that refers to the full regi
 This default can be overriden by using modifiers on the template string operands, just like you would with format strings:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let mut x: u16 = 0xab;
 
 unsafe {
@@ -350,12 +350,11 @@ If you use a smaller data type (e.g. `u16`) with an operand and forget the use t
 ## Memory address operands
 
 Sometimes assembly instructions require operands passed via memory addresses/memory locations.
-You have to manually use the memory address syntax specified by the respectively architectures.
-For example, in x86/x86_64 and intel assembly syntax, you should wrap inputs/outputs in `[]`
-to indicate they are memory operands:
+You have to manually use the memory address syntax specified by the target architecture.
+For example, on x86/x86_64 using intel assembly syntax, you should wrap inputs/outputs in `[]` to indicate they are memory operands:
 
 ```rust,allow_fail
-# #![feature(asm, llvm_asm)]
+#![feature(asm, llvm_asm)]
 # fn load_fpu_control_word(control: u16) {
 unsafe {
     asm!("fldcw [{}]", in(reg) &control, options(nostack));
@@ -366,14 +365,57 @@ unsafe {
 # }
 ```
 
+## Labels
+
+Any reuse of a named label, local or otherwise, can result in a assembler or linker error or may cause other strange behavior. Reuse of a named label can happen in a variety of ways including:
+
+-   explicitly: using a label more than once in one `asm!` block, or multiple times across blocks
+-   implicitly via inlining: the compiler is allowed to instantiate multiple copies of an `asm!` block, for example when the function containing it is inlined in multiple places.
+-   implicitly via LTO: LTO can cause code from *other crates* to be placed in the same codegen unit, and so could bring in arbitrary labels
+
+As a consequence, you should only use GNU assembler **numeric** [local labels] inside inline assembly code. Defining symbols in assembly code may lead to assembler and/or linker errors due to duplicate symbol definitions.
+
+Moreover, on x86 when using the default intel syntax, due to [an llvm bug], you shouldn't use labels exclusively made of `0` and `1` digits, e.g. `0`, `11` or `101010`, as they may end up being interpreted as binary values. Using `options(att_syntax)` will avoid any ambiguity, but that affects the syntax of the _entire_ `asm!` block.
+
+```rust,allow_fail
+#![feature(asm)]
+
+let mut a = 0;
+unsafe {
+    asm!(
+        "mov {0}, 10",
+        "2:",
+        "sub {0}, 1",
+        "cmp {0}, 3",
+        "jle 2f",
+        "jmp 2b",
+        "2:",
+        "add {0}, 2",
+        out(reg) a
+    );
+}
+assert_eq!(a, 5);
+```
+
+This will decrement the `{0}` register value from 10 to 3, then add 2 and store it in `a`.
+
+This example shows a few things:
+
+First that the same number can be used as a label multiple times in the same inline block.
+
+Second, that when a numeric label is used as a reference (as an instruction operand, for example), the suffixes b (“backward”) or f (“forward”) should be added to the numeric label. It will then refer to the nearest label defined by this number in this direction.
+
+[local labels]: https://sourceware.org/binutils/docs/as/Symbol-Names.html#Local-Labels
+[an llvm bug]: https://bugs.llvm.org/show_bug.cgi?id=36144
+
 ## Options
 
-By default, an inline assembly block is treated the same way as an external FFI function call with a custom calling convention: it may read/write memory, have observable side effects, etc. However in many cases, it is desirable to give the compiler more information about what the assembly code is actually doing so that it can optimize better.
+By default, an inline assembly block is treated the same way as an external FFI function call with a custom calling convention: it may read/write memory, have observable side effects, etc. However, in many cases it is desirable to give the compiler more information about what the assembly code is actually doing so that it can optimize better.
 
 Let's take our previous example of an `add` instruction:
 
 ```rust,allow_fail
-# #![feature(asm)]
+#![feature(asm)]
 let mut a: u64 = 4;
 let b: u64 = 4;
 unsafe {
@@ -411,12 +453,26 @@ reg_spec := <register class> / "<explicit register>"
 operand_expr := expr / "_" / expr "=>" expr / expr "=>" "_"
 reg_operand := dir_spec "(" reg_spec ")" operand_expr
 operand := reg_operand / "const" const_expr / "sym" path
-option := "pure" / "nomem" / "readonly" / "preserves_flags" / "noreturn" / "nostack" / "att_syntax"
+clobber_abi := "clobber_abi(" <abi> ")"
+option := "pure" / "nomem" / "readonly" / "preserves_flags" / "noreturn" / "nostack" / "att_syntax" / "raw"
 options := "options(" option *["," option] [","] ")"
-asm := "asm!(" format_string *("," format_string) *("," [ident "="] operand) ["," options] [","] ")"
+asm := "asm!(" format_string *("," format_string) *("," [ident "="] operand) ["," clobber_abi]  ["," options] [","] ")"
 ```
 
-The macro will initially be supported only on ARM, AArch64, Hexagon, x86, x86-64 and RISC-V targets. Support for more targets may be added in the future. The compiler will emit an error if `asm!` is used on an unsupported target.
+Inline assembly is currently supported on the following architectures:
+- x86 and x86-64
+- ARM
+- AArch64
+- RISC-V
+- NVPTX
+- PowerPC
+- Hexagon
+- MIPS32r2 and MIPS64r2
+- wasm32
+- BPF
+- SPIR-V
+
+Support for more targets may be added in the future. The compiler will emit an error if `asm!` is used on an unsupported target.
 
 [format-syntax]: https://doc.rust-lang.org/std/fmt/#syntax
 
@@ -465,7 +521,7 @@ Several types of operands are supported:
   - Identical to `inout` except that the register allocator can reuse a register allocated to an `in` (this can happen if the compiler knows the `in` has the same initial value as the `inlateout`).
   - You should only write to the register after all inputs are read, otherwise you may clobber an input.
 * `const <expr>`
-  - `<expr>` must be an integer or floating-point constant expression.
+  - `<expr>` must be an integer constant expression.
   - The value of the expression is formatted as a string and substituted directly into the asm template string.
 * `sym <path>`
   - `<path>` must refer to a `fn` or `static`.
@@ -492,20 +548,23 @@ Here is the list of currently supported register classes:
 
 | Architecture | Register class | Registers | LLVM constraint code |
 | ------------ | -------------- | --------- | -------------------- |
-| x86 | `reg` | `ax`, `bx`, `cx`, `dx`, `si`, `di`, `r[8-15]` (x86-64 only) | `r` |
+| x86 | `reg` | `ax`, `bx`, `cx`, `dx`, `si`, `di`, `bp`, `r[8-15]` (x86-64 only) | `r` |
 | x86 | `reg_abcd` | `ax`, `bx`, `cx`, `dx` | `Q` |
 | x86-32 | `reg_byte` | `al`, `bl`, `cl`, `dl`, `ah`, `bh`, `ch`, `dh` | `q` |
-| x86-64 | `reg_byte` | `al`, `bl`, `cl`, `dl`, `sil`, `dil`, `r[8-15]b`, `ah`\*, `bh`\*, `ch`\*, `dh`\* | `q` |
+| x86-64 | `reg_byte`\* | `al`, `bl`, `cl`, `dl`, `sil`, `dil`, `bpl`, `r[8-15]b` | `q` |
 | x86 | `xmm_reg` | `xmm[0-7]` (x86) `xmm[0-15]` (x86-64) | `x` |
 | x86 | `ymm_reg` | `ymm[0-7]` (x86) `ymm[0-15]` (x86-64) | `x` |
 | x86 | `zmm_reg` | `zmm[0-7]` (x86) `zmm[0-31]` (x86-64) | `v` |
 | x86 | `kreg` | `k[1-7]` | `Yk` |
-| AArch64 | `reg` | `x[0-28]`, `x30` | `r` |
+| x86 | `x87_reg` | `st([0-7])` | Only clobbers |
+| x86 | `mmx_reg` | `mm[0-7]` | Only clobbers |
+| AArch64 | `reg` | `x[0-30]` | `r` |
 | AArch64 | `vreg` | `v[0-31]` | `w` |
 | AArch64 | `vreg_low16` | `v[0-15]` | `x` |
-| ARM | `reg` | `r[0-5]` `r7`\*, `r[8-10]`, `r11`\*, `r12`, `r14` | `r` |
+| AArch64 | `preg` | `p[0-15]`, `ffr` | Only clobbers |
+| ARM | `reg` | `r[0-12]`, `r14` | `r` |
 | ARM (Thumb) | `reg_thumb` | `r[0-r7]` | `l` |
-| ARM (ARM) | `reg_thumb` | `r[0-r10]`, `r12`, `r14` | `l` |
+| ARM (ARM) | `reg_thumb` | `r[0-r12]`, `r14` | `l` |
 | ARM | `sreg` | `s[0-31]` | `t` |
 | ARM | `sreg_low16` | `s[0-15]` | `x` |
 | ARM | `dreg` | `d[0-31]` | `w` |
@@ -521,18 +580,26 @@ Here is the list of currently supported register classes:
 | NVPTX | `reg64` | None\* | `l` |
 | RISC-V | `reg` | `x1`, `x[5-7]`, `x[9-15]`, `x[16-31]` (non-RV32E) | `r` |
 | RISC-V | `freg` | `f[0-31]` | `f` |
+| RISC-V | `vreg` | `v[0-31]` | Only clobbers |
 | Hexagon | `reg` | `r[0-28]` | `r` |
+| PowerPC | `reg` | `r[0-31]` | `r` |
+| PowerPC | `reg_nonzero` | | `r[1-31]` | `b` |
+| PowerPC | `freg` | `f[0-31]` | `f` |
+| PowerPC | `cr` | `cr[0-7]`, `cr` | Only clobbers |
+| PowerPC | `xer` | `xer` | Only clobbers |
 | wasm32 | `local` | None\* | `r` |
+| BPF | `reg` | `r[0-10]` | `r` |
+| BPF | `wreg` | `w[0-10]` | `w` |
 
 > **Note**: On x86 we treat `reg_byte` differently from `reg` because the compiler can allocate `al` and `ah` separately whereas `reg` reserves the whole register.
 >
-> Note #2: On x86-64 the high byte registers (e.g. `ah`) are only available when used as an explicit register. Specifying the `reg_byte` register class for an operand will always allocate a low byte register.
+> Note #2: On x86-64 the high byte registers (e.g. `ah`) are not available in the `reg_byte` register class.
 >
 > Note #3: NVPTX doesn't have a fixed register set, so named registers are not supported.
 >
-> Note #4: On ARM the frame pointer is either `r7` or `r11` depending on the platform.
+> Note #4: WebAssembly doesn't have registers, so named registers are not supported.
 >
-> Note #5: WebAssembly doesn't have registers, so named registers are not supported.
+> Note #5: Some register classes are marked as "Only clobbers" which means that they cannot be used for inputs or outputs, only clobbers of the form `out("reg") _` or `lateout("reg") _`.
 
 Additional register classes may be added in the future based on demand (e.g. MMX, x87, etc).
 
@@ -548,8 +615,11 @@ Each register class has constraints on which value types they can be used with. 
 | x86 | `zmm_reg` | `avx512f` | `i32`, `f32`, `i64`, `f64`, <br> `i8x16`, `i16x8`, `i32x4`, `i64x2`, `f32x4`, `f64x2` <br> `i8x32`, `i16x16`, `i32x8`, `i64x4`, `f32x8`, `f64x4` <br> `i8x64`, `i16x32`, `i32x16`, `i64x8`, `f32x16`, `f64x8` |
 | x86 | `kreg` | `axv512f` | `i8`, `i16` |
 | x86 | `kreg` | `axv512bw` | `i32`, `i64` |
+| x86 | `mmx_reg` | N/A | Only clobbers |
+| x86 | `x87_reg` | N/A | Only clobbers |
 | AArch64 | `reg` | None | `i8`, `i16`, `i32`, `f32`, `i64`, `f64` |
 | AArch64 | `vreg` | `fp` | `i8`, `i16`, `i32`, `f32`, `i64`, `f64`, <br> `i8x8`, `i16x4`, `i32x2`, `i64x1`, `f32x2`, `f64x1`, <br> `i8x16`, `i16x8`, `i32x4`, `i64x2`, `f32x4`, `f64x2` |
+| AArch64 | `preg` | N/A | Only clobbers |
 | ARM | `reg` | None | `i8`, `i16`, `i32`, `f32` |
 | ARM | `sreg` | `vfp2` | `i32`, `f32` |
 | ARM | `dreg` | `vfp2` | `i64`, `f64`, `i8x8`, `i16x4`, `i32x2`, `i64x1`, `f32x2` |
@@ -565,8 +635,16 @@ Each register class has constraints on which value types they can be used with. 
 | RISC-V64 | `reg` | None | `i8`, `i16`, `i32`, `f32`, `i64`, `f64` |
 | RISC-V | `freg` | `f` | `f32` |
 | RISC-V | `freg` | `d` | `f64` |
+| RISC-V | `vreg` | N/A | Only clobbers |
 | Hexagon | `reg` | None | `i8`, `i16`, `i32`, `f32` |
+| PowerPC | `reg` | None | `i8`, `i16`, `i32` |
+| PowerPC | `reg_nonzero` | None | `i8`, `i16`, `i32` |
+| PowerPC | `freg` | None | `f32`, `f64` |
+| PowerPC | `cr` | N/A | Only clobbers |
+| PowerPC | `xer` | N/A | Only clobbers |
 | wasm32 | `local` | None | `i8` `i16` `i32` `i64` `f32` `f64` |
+| BPF | `reg` | None | `i8` `i16` `i32` `i64` |
+| BPF | `wreg` | `alu32` | `i8` `i16` `i32` |
 
 > **Note**: For the purposes of the above table pointers, function pointers and `isize`/`usize` are treated as the equivalent integer type (`i16`/`i32`/`i64` depending on the target).
 
@@ -626,6 +704,7 @@ Some registers have multiple names. These are all treated by the compiler as ide
 | Hexagon | `r29` | `sp` |
 | Hexagon | `r30` | `fr` |
 | Hexagon | `r31` | `lr` |
+| BPF | `r[0-10]` | `w[0-10]` |
 
 Some registers cannot be used for input or output operands:
 
@@ -634,13 +713,14 @@ Some registers cannot be used for input or output operands:
 | All | `sp` | The stack pointer must be restored to its original value at the end of an asm code block. |
 | All | `bp` (x86), `x29` (AArch64), `x8` (RISC-V), `fr` (Hexagon), `$fp` (MIPS) | The frame pointer cannot be used as an input or output. |
 | ARM | `r7` or `r11` | On ARM the frame pointer can be either `r7` or `r11` depending on the target. The frame pointer cannot be used as an input or output. |
-| ARM | `r6` | `r6` is used internally by LLVM as a base pointer and therefore cannot be used as an input or output. |
+| All | `si` (x86-32), `bx` (x86-64), `r6` (ARM), `x19` (AArch64), `r19` (Hexagon), `x9` (RISC-V) | This is used internally by LLVM as a "base pointer" for functions with complex stack frames. |
 | x86 | `k0` | This is a constant zero register which can't be modified. |
 | x86 | `ip` | This is the program counter, not a real register. |
 | x86 | `mm[0-7]` | MMX registers are not currently supported (but may be in the future). |
 | x86 | `st([0-7])` | x87 registers are not currently supported (but may be in the future). |
 | AArch64 | `xzr` | This is a constant zero register which can't be modified. |
 | ARM | `pc` | This is the program counter, not a real register. |
+| ARM | `r9` | This is a reserved register on some ARM targets. |
 | MIPS | `$0` or `$zero` | This is a constant zero register which can't be modified. |
 | MIPS | `$1` or `$at` | Reserved for assembler. |
 | MIPS | `$26`/`$k0`, `$27`/`$k1` | OS-reserved registers. |
@@ -650,9 +730,10 @@ Some registers cannot be used for input or output operands:
 | RISC-V | `gp`, `tp` | These registers are reserved and cannot be used as inputs or outputs. |
 | Hexagon | `lr` | This is the link register which cannot be used as an input or output. |
 
-In some cases LLVM will allocate a "reserved register" for `reg` operands even though this register cannot be explicitly specified. Assembly code making use of reserved registers should be careful since `reg` operands may alias with those registers. Reserved registers are:
-- The frame pointer on all architectures.
-- `r6` on ARM.
+In some cases LLVM will allocate a "reserved register" for `reg` operands even though this register cannot be explicitly specified. Assembly code making use of reserved registers should be careful since `reg` operands may alias with those registers. Reserved registers are the frame pointer and base pointer
+- The frame pointer and LLVM base pointer on all architectures.
+- `r9` on ARM.
+- `x18` on AArch64.
 
 ## Template modifiers
 
@@ -701,6 +782,9 @@ The supported modifiers are a subset of LLVM's (and GCC's) [asm template argumen
 | RISC-V | `reg` | None | `x1` | None |
 | RISC-V | `freg` | None | `f0` | None |
 | Hexagon | `reg` | None | `r0` | None |
+| PowerPC | `reg` | None | `0` | None |
+| PowerPC | `reg_nonzero` | None | `3` | `b` |
+| PowerPC | `freg` | None | `0` | None |
 
 > Notes:
 > - on ARM `e` / `f`: this prints the low or high doubleword register name of a NEON quad (128-bit) register.
@@ -710,6 +794,24 @@ The supported modifiers are a subset of LLVM's (and GCC's) [asm template argumen
 As stated in the previous section, passing an input value smaller than the register width will result in the upper bits of the register containing undefined values. This is not a problem if the inline asm only accesses the lower bits of the register, which can be done by using a template modifier to use a subregister name in the asm code (e.g. `ax` instead of `rax`). Since this an easy pitfall, the compiler will suggest a template modifier to use where appropriate given the input type. If all references to an operand already have modifiers then the warning is suppressed for that operand.
 
 [llvm-argmod]: http://llvm.org/docs/LangRef.html#asm-template-argument-modifiers
+
+## ABI clobbers
+
+The `clobber_abi` keyword can be used to apply a default set of clobbers to an `asm` block. This will automatically insert the necessary clobber constraints as needed for calling a function with a particular calling convention: if the calling convention does not fully preserve the value of a register across a call then a `lateout("reg") _` is implicitly added to the operands list.
+
+Generic register class outputs are disallowed by the compiler when `clobber_abi` is used: all outputs must specify an explicit register. Explicit register outputs have precedence over the implicit clobbers inserted by `clobber_abi`: a clobber will only be inserted for a register if that register is not used as an output.
+The following ABIs can be used with `clobber_abi`:
+
+| Architecture | ABI name | Clobbered registers |
+| ------------ | -------- | ------------------- |
+| x86-32 | `"C"`, `"system"`, `"efiapi"`, `"cdecl"`, `"stdcall"`, `"fastcall"` | `ax`, `cx`, `dx`, `xmm[0-7]`, `mm[0-7]`, `k[1-7]`, `st([0-7])` |
+| x86-64 | `"C"`, `"system"` (on Windows), `"efiapi"`, `"win64"` | `ax`, `cx`, `dx`, `r[8-11]`, `xmm[0-31]`, `mm[0-7]`, `k[1-7]`, `st([0-7])` |
+| x86-64 | `"C"`, `"system"` (on non-Windows), `"sysv64"` | `ax`, `cx`, `dx`, `si`, `di`, `r[8-11]`, `xmm[0-31]`, `mm[0-7]`, `k[1-7]`, `st([0-7])` |
+| AArch64 | `"C"`, `"system"`, `"efiapi"` | `x[0-17]`, `x30`, `v[0-31]`, `p[0-15]`, `ffr` |
+| ARM | `"C"`, `"system"`, `"efiapi"`, `"aapcs"` | `r[0-3]`, `r12`, `r14`, `s[0-15]`, `d[0-7]`, `d[16-31]` |
+| RISC-V | `"C"`, `"system"`, `"efiapi"` | `x1`, `x[5-7]`, `x[10-17]`, `x[28-31]`, `f[0-7]`, `f[10-17]`, `f[28-31]`, `v[0-31]` |
+
+The list of clobbered registers for each ABI is updated in rustc as architectures gain new registers: this ensures that `asm` clobbers will continue to be correct when LLVM starts using these new registers in its generated code.
 
 ## Options
 
@@ -722,6 +824,7 @@ Currently the following options are defined:
 - `noreturn`: The `asm` block never returns, and its return type is defined as `!` (never). Behavior is undefined if execution falls through past the end of the asm code. A `noreturn` asm block behaves just like a function which doesn't return; notably, local variables in scope are not dropped before it is invoked.
 - `nostack`: The `asm` block does not push data to the stack, or write to the stack red-zone (if supported by the target). If this option is *not* used then the stack pointer is guaranteed to be suitably aligned (according to the target ABI) for a function call.
 - `att_syntax`: This option is only valid on x86, and causes the assembler to use the `.att_syntax prefix` mode of the GNU assembler. Register operands are substituted in with a leading `%`.
+- `raw`: This causes the template string to be parsed as a raw assembly string, with no special handling for `{` and `}`. This is primarily useful when including raw assembly code from an external file using `include_str!`.
 
 The compiler performs some additional checks on options:
 - The `nomem` and `readonly` options are mutually exclusive: it is a compile-time error to specify both.
@@ -738,7 +841,7 @@ The compiler performs some additional checks on options:
   - Note that a `lateout` may be allocated to the same register as an `in`, in which case this rule does not apply. Code should not rely on this however since it depends on the results of register allocation.
 - Behavior is undefined if execution unwinds out of an asm block.
   - This also applies if the assembly code calls a function which then unwinds.
-- The set of memory locations that assembly code is allowed the read and write are the same as those allowed for an FFI function.
+- The set of memory locations that assembly code is allowed to read and write are the same as those allowed for an FFI function.
   - Refer to the unsafe code guidelines for the exact rules.
   - If the `readonly` option is set, then only memory reads are allowed.
   - If the `nomem` option is set then no reads or writes to memory are allowed.
@@ -772,6 +875,7 @@ The compiler performs some additional checks on options:
     - Floating-point status (`FPSR` register).
   - RISC-V
     - Floating-point exception flags in `fcsr` (`fflags`).
+    - Vector extension state (`vtype`, `vl`, `vcsr`).
 - On x86, the direction flag (DF in `EFLAGS`) is clear on entry to an asm block and must be clear on exit.
   - Behavior is undefined if the direction flag is set on exiting an asm block.
 - The requirement of restoring the stack pointer and non-output registers to their original value only applies when exiting an `asm!` block.
@@ -781,8 +885,5 @@ The compiler performs some additional checks on options:
     - You are responsible for switching any target-specific state (e.g. thread-local storage, stack bounds).
     - The set of memory locations that you may access is the intersection of those allowed by the `asm!` blocks you entered and exited.
 - You cannot assume that an `asm!` block will appear exactly once in the output binary. The compiler is allowed to instantiate multiple copies of the `asm!` block, for example when the function containing it is inlined in multiple places.
-  - As a consequence, you should only use [local labels] inside inline assembly code. Defining symbols in assembly code may lead to assembler and/or linker errors due to duplicate symbol definitions.
 
 > **Note**: As a general rule, the flags covered by `preserves_flags` are those which are *not* preserved when performing a function call.
-
-[local labels]: https://sourceware.org/binutils/docs/as/Symbol-Names.html#Local-Labels

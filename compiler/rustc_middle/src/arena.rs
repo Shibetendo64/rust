@@ -9,11 +9,13 @@
 /// listed. These impls will appear in the implement_ty_decoder! macro.
 #[macro_export]
 macro_rules! arena_types {
-    ($macro:path, $args:tt, $tcx:lifetime) => (
-        $macro!($args, [
-            [] layouts: rustc_target::abi::Layout,
+    ($macro:path, $tcx:lifetime) => (
+        $macro!([
+            [] layout: rustc_target::abi::Layout,
+            [] fn_abi: rustc_target::abi::call::FnAbi<$tcx, rustc_middle::ty::Ty<$tcx>>,
             // AdtDef are interned and compared by address
             [] adt_def: rustc_middle::ty::AdtDef,
+            [] steal_thir: rustc_data_structures::steal::Steal<rustc_middle::thir::Thir<$tcx>>,
             [] steal_mir: rustc_data_structures::steal::Steal<rustc_middle::mir::Body<$tcx>>,
             [decode] mir: rustc_middle::mir::Body<$tcx>,
             [] steal_promoted:
@@ -91,7 +93,7 @@ macro_rules! arena_types {
             [] predicates: rustc_middle::ty::PredicateInner<$tcx>,
 
             // HIR query types
-            [few] indexed_hir: rustc_middle::hir::map::IndexedHir<$tcx>,
+            [few] indexed_hir: rustc_middle::hir::IndexedHir<$tcx>,
             [few] hir_definitions: rustc_hir::definitions::Definitions,
             [] hir_owner: rustc_middle::hir::Owner<$tcx>,
             [] hir_owner_nodes: rustc_middle::hir::OwnerNodes<$tcx>,
@@ -108,4 +110,4 @@ macro_rules! arena_types {
     )
 }
 
-arena_types!(rustc_arena::declare_arena, [], 'tcx);
+arena_types!(rustc_arena::declare_arena, 'tcx);

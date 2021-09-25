@@ -1,5 +1,7 @@
-use crate::mir::interpret::ConstValue;
-use crate::mir::interpret::Scalar;
+use std::convert::TryInto;
+use std::fmt;
+
+use crate::mir::interpret::{AllocId, ConstValue, Scalar};
 use crate::mir::Promoted;
 use crate::ty::subst::{InternalSubsts, SubstsRef};
 use crate::ty::ParamEnv;
@@ -9,9 +11,60 @@ use rustc_hir::def_id::DefId;
 use rustc_macros::HashStable;
 use rustc_target::abi::Size;
 
+use super::ScalarInt;
+/// An unevaluated, potentially generic, constant.
+///
+/// If `substs_` is `None` it means that this anon const
+/// still has its default substs.
+///
+/// We check for all possible substs in `fn default_anon_const_substs`,
+/// so refer to that check for more info.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, TyEncodable, TyDecodable, Lift)]
+#[derive(Hash, HashStable)]
+pub struct Unevaluated<'tcx, P = Option<Promoted>> {
+    pub def: ty::WithOptConstParam<DefId>,
+    pub substs_: Option<SubstsRef<'tcx>>,
+    pub promoted: P,
+}
+
+impl<'tcx> Unevaluated<'tcx> {
+    #[inline]
+    pub fn shrink(self) -> Unevaluated<'tcx, ()> {
+        debug_assert_eq!(self.promoted, None);
+        Unevaluated { def: self.def, substs_: self.substs_, promoted: () }
+    }
+}
+
+impl<'tcx> Unevaluated<'tcx, ()> {
+    #[inline]
+    pub fn expand(self) -> Unevaluated<'tcx> {
+        Unevaluated { def: self.def, substs_: self.substs_, promoted: None }
+    }
+}
+
+impl<'tcx, P: Default> Unevaluated<'tcx, P> {
+    #[inline]
+    pub fn new(def: ty::WithOptConstParam<DefId>, substs: SubstsRef<'tcx>) -> Unevaluated<'tcx, P> {
+        Unevaluated { def, substs_: Some(substs), promoted: Default::default() }
+    }
+}
+
+impl<'tcx, P: Default + PartialEq + fmt::Debug> Unevaluated<'tcx, P> {
+    #[inline]
+    pub fn substs(self, tcx: TyCtxt<'tcx>) -> SubstsRef<'tcx> {
+        self.substs_.unwrap_or_else(|| {
+            // We must not use the parents default substs for promoted constants
+            // as that can result in incorrect substs and calls the `default_anon_const_substs`
+            // for something that might not actually be a constant.
+            debug_assert_eq!(self.promoted, Default::default());
+            tcx.default_anon_const_substs(self.def.did)
+        })
+    }
+}
+
 /// Represents a constant in Rust.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, TyEncodable, TyDecodable, Hash)]
-#[derive(HashStable)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, TyEncodable, TyDecodable)]
+#[derive(Hash, HashStable)]
 pub enum ConstKind<'tcx> {
     /// A const generic parameter.
     Param(ty::ParamConst),
@@ -27,7 +80,7 @@ pub enum ConstKind<'tcx> {
 
     /// Used in the HIR by using `Unevaluated` everywhere and later normalizing to one of the other
     /// variants when the code is monomorphic enough for that.
-    Unevaluated(ty::WithOptConstParam<DefId>, SubstsRef<'tcx>, Option<Promoted>),
+    Unevaluated(Unevaluated<'tcx>),
 
     /// Used to hold computed value.
     Value(ConstValue<'tcx>),
@@ -47,18 +100,23 @@ impl<'tcx> ConstKind<'tcx> {
     }
 
     #[inline]
-    pub fn try_to_scalar(self) -> Option<Scalar> {
+    pub fn try_to_scalar(self) -> Option<Scalar<AllocId>> {
         self.try_to_value()?.try_to_scalar()
     }
 
     #[inline]
+    pub fn try_to_scalar_int(self) -> Option<ScalarInt> {
+        Some(self.try_to_value()?.try_to_scalar()?.assert_int())
+    }
+
+    #[inline]
     pub fn try_to_bits(self, size: Size) -> Option<u128> {
-        self.try_to_value()?.try_to_bits(size)
+        self.try_to_scalar_int()?.to_bits(size).ok()
     }
 
     #[inline]
     pub fn try_to_bool(self) -> Option<bool> {
-        self.try_to_value()?.try_to_bool()
+        self.try_to_scalar_int()?.try_into().ok()
     }
 
     #[inline]
@@ -93,7 +151,7 @@ impl<'tcx> ConstKind<'tcx> {
         tcx: TyCtxt<'tcx>,
         param_env: ParamEnv<'tcx>,
     ) -> Option<Result<ConstValue<'tcx>, ErrorReported>> {
-        if let ConstKind::Unevaluated(def, substs, promoted) = self {
+        if let ConstKind::Unevaluated(unevaluated) = self {
             use crate::mir::interpret::ErrorHandled;
 
             // HACK(eddyb) this erases lifetimes even though `const_eval_resolve`
@@ -102,28 +160,32 @@ impl<'tcx> ConstKind<'tcx> {
             // Note that we erase regions *before* calling `with_reveal_all_normalized`,
             // so that we don't try to invoke this query with
             // any region variables.
-            let param_env_and_substs = tcx
+            let param_env_and = tcx
                 .erase_regions(param_env)
                 .with_reveal_all_normalized(tcx)
-                .and(tcx.erase_regions(substs));
+                .and(tcx.erase_regions(unevaluated));
 
             // HACK(eddyb) when the query key would contain inference variables,
             // attempt using identity substs and `ParamEnv` instead, that will succeed
             // when the expression doesn't depend on any parameters.
             // FIXME(eddyb, skinny121) pass `InferCtxt` into here when it's available, so that
             // we can call `infcx.const_eval_resolve` which handles inference variables.
-            let param_env_and_substs = if param_env_and_substs.needs_infer() {
-                tcx.param_env(def.did).and(InternalSubsts::identity_for_item(tcx, def.did))
+            let param_env_and = if param_env_and.needs_infer() {
+                tcx.param_env(unevaluated.def.did).and(ty::Unevaluated {
+                    def: unevaluated.def,
+                    substs_: Some(InternalSubsts::identity_for_item(tcx, unevaluated.def.did)),
+                    promoted: unevaluated.promoted,
+                })
             } else {
-                param_env_and_substs
+                param_env_and
             };
 
             // FIXME(eddyb) maybe the `const_eval_*` methods should take
-            // `ty::ParamEnvAnd<SubstsRef>` instead of having them separate.
-            let (param_env, substs) = param_env_and_substs.into_parts();
+            // `ty::ParamEnvAnd` instead of having them separate.
+            let (param_env, unevaluated) = param_env_and.into_parts();
             // try to resolve e.g. associated constants to their definition on an impl, and then
             // evaluate the const.
-            match tcx.const_eval_resolve(param_env, def, substs, promoted, None) {
+            match tcx.const_eval_resolve(param_env, unevaluated, None) {
                 // NOTE(eddyb) `val` contains no lifetimes/types/consts,
                 // and we use the original type, so nothing from `substs`
                 // (which may be identity substs, see above),

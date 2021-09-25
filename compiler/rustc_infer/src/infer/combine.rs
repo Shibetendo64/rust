@@ -129,6 +129,8 @@ impl<'infcx, 'tcx> InferCtxt<'infcx, 'tcx> {
     where
         R: ConstEquateRelation<'tcx>,
     {
+        let a = self.tcx.expose_default_const_substs(a);
+        let b = self.tcx.expose_default_const_substs(b);
         debug!("{}.consts({:?}, {:?})", relation.tag(), a, b);
         if a == b {
             return Ok(a);
@@ -191,7 +193,7 @@ impl<'infcx, 'tcx> InferCtxt<'infcx, 'tcx> {
     ///
     /// This also tests if the given const `ct` contains an inference variable which was previously
     /// unioned with `target_vid`. If this is the case, inferring `target_vid` to `ct`
-    /// would result in an infinite type as we continously replace an inference variable
+    /// would result in an infinite type as we continuously replace an inference variable
     /// in `ct` with `ct` itself.
     ///
     /// This is especially important as unevaluated consts use their parents generics.
@@ -200,7 +202,7 @@ impl<'infcx, 'tcx> InferCtxt<'infcx, 'tcx> {
     /// A good example of this is the following:
     ///
     /// ```rust
-    /// #![feature(const_generics)]
+    /// #![feature(generic_const_exprs)]
     ///
     /// fn bind<const N: usize>(value: [u8; N]) -> [u8; 3 + 4] {
     ///     todo!()
@@ -358,7 +360,8 @@ impl<'infcx, 'tcx> CombineFields<'infcx, 'tcx> {
             self.obligations.push(Obligation::new(
                 self.trace.cause.clone(),
                 self.param_env,
-                ty::PredicateKind::WellFormed(b_ty.into()).to_predicate(self.infcx.tcx),
+                ty::Binder::dummy(ty::PredicateKind::WellFormed(b_ty.into()))
+                    .to_predicate(self.infcx.tcx),
             ));
         }
 
@@ -371,9 +374,12 @@ impl<'infcx, 'tcx> CombineFields<'infcx, 'tcx> {
         match dir {
             EqTo => self.equate(a_is_expected).relate(a_ty, b_ty),
             SubtypeOf => self.sub(a_is_expected).relate(a_ty, b_ty),
-            SupertypeOf => {
-                self.sub(a_is_expected).relate_with_variance(ty::Contravariant, a_ty, b_ty)
-            }
+            SupertypeOf => self.sub(a_is_expected).relate_with_variance(
+                ty::Contravariant,
+                ty::VarianceDiagInfo::default(),
+                a_ty,
+                b_ty,
+            ),
         }?;
 
         Ok(())
@@ -458,7 +464,7 @@ impl<'infcx, 'tcx> CombineFields<'infcx, 'tcx> {
         self.obligations.push(Obligation::new(
             self.trace.cause.clone(),
             self.param_env,
-            predicate.to_predicate(self.tcx()),
+            ty::Binder::dummy(predicate).to_predicate(self.tcx()),
         ));
     }
 }
@@ -543,15 +549,11 @@ impl TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
         true
     }
 
-    fn visit_ct_substs(&self) -> bool {
-        true
-    }
-
     fn binders<T>(
         &mut self,
-        a: ty::Binder<T>,
-        b: ty::Binder<T>,
-    ) -> RelateResult<'tcx, ty::Binder<T>>
+        a: ty::Binder<'tcx, T>,
+        b: ty::Binder<'tcx, T>,
+    ) -> RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
         T: Relate<'tcx>,
     {
@@ -578,6 +580,7 @@ impl TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
     fn relate_with_variance<T: Relate<'tcx>>(
         &mut self,
         variance: ty::Variance,
+        _info: ty::VarianceDiagInfo<'tcx>,
         a: T,
         b: T,
     ) -> RelateResult<'tcx, T> {
@@ -643,8 +646,13 @@ impl TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                                 .inner
                                 .borrow_mut()
                                 .type_variables()
-                                .new_var(self.for_universe, false, origin);
+                                .new_var(self.for_universe, origin);
                             let u = self.tcx().mk_ty_var(new_var_id);
+
+                            // Record that we replaced `vid` with `new_var_id` as part of a generalization
+                            // operation. This is needed to detect cyclic types. To see why, see the
+                            // docs in the `type_variables` module.
+                            self.infcx.inner.borrow_mut().type_variables().sub(vid, new_var_id);
                             debug!("generalize: replacing original vid={:?} with new={:?}", vid, u);
                             Ok(u)
                         }
@@ -737,6 +745,20 @@ impl TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                     }
                 }
             }
+            ty::ConstKind::Unevaluated(uv) if self.tcx().lazy_normalization() => {
+                assert_eq!(uv.promoted, None);
+                let substs = uv.substs(self.tcx());
+                let substs = self.relate_with_variance(
+                    ty::Variance::Invariant,
+                    ty::VarianceDiagInfo::default(),
+                    substs,
+                    substs,
+                )?;
+                Ok(self.tcx().mk_const(ty::Const {
+                    ty: c.ty,
+                    val: ty::ConstKind::Unevaluated(ty::Unevaluated::new(uv.def, substs)),
+                }))
+            }
             _ => relate::super_relate_consts(self, c, c),
         }
     }
@@ -822,13 +844,10 @@ impl TypeRelation<'tcx> for ConstInferUnifier<'_, 'tcx> {
         true
     }
 
-    fn visit_ct_substs(&self) -> bool {
-        true
-    }
-
     fn relate_with_variance<T: Relate<'tcx>>(
         &mut self,
         _variance: ty::Variance,
+        _info: ty::VarianceDiagInfo<'tcx>,
         a: T,
         b: T,
     ) -> RelateResult<'tcx, T> {
@@ -838,9 +857,9 @@ impl TypeRelation<'tcx> for ConstInferUnifier<'_, 'tcx> {
 
     fn binders<T>(
         &mut self,
-        a: ty::Binder<T>,
-        b: ty::Binder<T>,
-    ) -> RelateResult<'tcx, ty::Binder<T>>
+        a: ty::Binder<'tcx, T>,
+        b: ty::Binder<'tcx, T>,
+    ) -> RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
         T: Relate<'tcx>,
     {
@@ -867,11 +886,12 @@ impl TypeRelation<'tcx> for ConstInferUnifier<'_, 'tcx> {
 
                         let origin =
                             *self.infcx.inner.borrow_mut().type_variables().var_origin(vid);
-                        let new_var_id = self.infcx.inner.borrow_mut().type_variables().new_var(
-                            self.for_universe,
-                            false,
-                            origin,
-                        );
+                        let new_var_id = self
+                            .infcx
+                            .inner
+                            .borrow_mut()
+                            .type_variables()
+                            .new_var(self.for_universe, origin);
                         let u = self.tcx().mk_ty_var(new_var_id);
                         debug!(
                             "ConstInferUnifier: replacing original vid={:?} with new={:?}",
@@ -958,6 +978,20 @@ impl TypeRelation<'tcx> for ConstInferUnifier<'_, 'tcx> {
                         }
                     }
                 }
+            }
+            ty::ConstKind::Unevaluated(uv) if self.tcx().lazy_normalization() => {
+                assert_eq!(uv.promoted, None);
+                let substs = uv.substs(self.tcx());
+                let substs = self.relate_with_variance(
+                    ty::Variance::Invariant,
+                    ty::VarianceDiagInfo::default(),
+                    substs,
+                    substs,
+                )?;
+                Ok(self.tcx().mk_const(ty::Const {
+                    ty: c.ty,
+                    val: ty::ConstKind::Unevaluated(ty::Unevaluated::new(uv.def, substs)),
+                }))
             }
             _ => relate::super_relate_consts(self, c, c),
         }

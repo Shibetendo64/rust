@@ -128,7 +128,7 @@ pub fn spin_loop() {
         #[cfg(target_arch = "aarch64")]
         {
             // SAFETY: the `cfg` attr ensures that we only execute this on aarch64 targets.
-            unsafe { crate::arch::aarch64::__yield() };
+            unsafe { crate::arch::aarch64::__isb(crate::arch::aarch64::SY) };
         }
         #[cfg(target_arch = "arm")]
         {
@@ -152,23 +152,8 @@ pub fn spin_loop() {
 /// backend used. Programs cannot rely on `black_box` for *correctness* in any way.
 ///
 /// [`std::convert::identity`]: crate::convert::identity
-#[cfg_attr(not(miri), inline)]
-#[cfg_attr(miri, inline(never))]
-#[unstable(feature = "test", issue = "50297")]
-#[cfg_attr(miri, allow(unused_mut))]
-pub fn black_box<T>(mut dummy: T) -> T {
-    // We need to "use" the argument in some way LLVM can't introspect, and on
-    // targets that support it we can typically leverage inline assembly to do
-    // this. LLVM's interpretation of inline assembly is that it's, well, a black
-    // box. This isn't the greatest implementation since it probably deoptimizes
-    // more than we want, but it's so far good enough.
-
-    #[cfg(not(miri))] // This is just a hint, so it is fine to skip in Miri.
-    // SAFETY: the inline assembly is a no-op.
-    unsafe {
-        // FIXME: Cannot use `asm!` because it doesn't support MIPS and other architectures.
-        llvm_asm!("" : : "r"(&mut dummy) : "memory" : "volatile");
-    }
-
-    dummy
+#[inline]
+#[unstable(feature = "bench_black_box", issue = "64102")]
+pub fn black_box<T>(dummy: T) -> T {
+    crate::intrinsics::black_box(dummy)
 }

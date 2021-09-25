@@ -110,15 +110,14 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
         };
 
         Some(Item {
-            source: Span::dummy(),
             name: None,
             attrs: Default::default(),
             visibility: Inherited,
-            def_id: self.cx.next_def_id(item_def_id.krate),
+            def_id: ItemId::Auto { trait_: trait_def_id, for_: item_def_id },
             kind: box ImplItem(Impl {
+                span: Span::dummy(),
                 unsafety: hir::Unsafety::Normal,
                 generics: new_generics,
-                provided_trait_methods: Default::default(),
                 trait_: Some(trait_ref.clean(self.cx).get_trait_type().unwrap()),
                 for_: ty.clean(self.cx),
                 items: Vec::new(),
@@ -126,6 +125,7 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                 synthetic: true,
                 blanket_impl: None,
             }),
+            cfg: None,
         })
     }
 
@@ -316,7 +316,7 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
         let bound_predicate = pred.kind();
         let tcx = self.cx.tcx;
         let regions = match bound_predicate.skip_binder() {
-            ty::PredicateKind::Trait(poly_trait_pred, _) => {
+            ty::PredicateKind::Trait(poly_trait_pred) => {
                 tcx.collect_referenced_late_bound_regions(&bound_predicate.rebind(poly_trait_pred))
             }
             ty::PredicateKind::Projection(poly_proj_pred) => {
@@ -331,9 +331,10 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                 match br {
                     // We only care about named late bound regions, as we need to add them
                     // to the 'for<>' section
-                    ty::BrNamed(_, name) => {
-                        Some(GenericParamDef { name, kind: GenericParamDefKind::Lifetime })
-                    }
+                    ty::BrNamed(_, name) => Some(GenericParamDef {
+                        name,
+                        kind: GenericParamDefKind::Lifetime { outlives: vec![] },
+                    }),
                     _ => None,
                 }
             })
@@ -351,14 +352,9 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
             .flat_map(|(ty, mut bounds)| {
                 if let Some(data) = ty_to_fn.get(&ty) {
                     let (poly_trait, output) =
-                        (data.0.as_ref().expect("as_ref failed").clone(), data.1.as_ref().cloned());
+                        (data.0.as_ref().unwrap().clone(), data.1.as_ref().cloned().map(Box::new));
                     let new_ty = match poly_trait.trait_ {
-                        Type::ResolvedPath {
-                            ref path,
-                            ref param_names,
-                            ref did,
-                            ref is_generic,
-                        } => {
+                        Type::ResolvedPath { ref path, ref did, ref is_generic } => {
                             let mut new_path = path.clone();
                             let last_segment =
                                 new_path.segments.pop().expect("segments were empty");
@@ -395,7 +391,6 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
 
                             Type::ResolvedPath {
                                 path: new_path,
-                                param_names: param_names.clone(),
                                 did: *did,
                                 is_generic: *is_generic,
                             }
@@ -414,7 +409,11 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                 let mut bounds_vec = bounds.into_iter().collect();
                 self.sort_where_bounds(&mut bounds_vec);
 
-                Some(WherePredicate::BoundPredicate { ty, bounds: bounds_vec })
+                Some(WherePredicate::BoundPredicate {
+                    ty,
+                    bounds: bounds_vec,
+                    bound_params: Vec::new(),
+                })
             })
             .chain(
                 lifetime_to_bounds.into_iter().filter(|&(_, ref bounds)| !bounds.is_empty()).map(
@@ -465,7 +464,7 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
             .filter(|p| {
                 !orig_bounds.contains(p)
                     || match p.kind().skip_binder() {
-                        ty::PredicateKind::Trait(pred, _) => pred.def_id() == sized_trait,
+                        ty::PredicateKind::Trait(pred) => pred.def_id() == sized_trait,
                         _ => false,
                     }
             })
@@ -492,7 +491,7 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
             }
             let p = p.unwrap();
             match p {
-                WherePredicate::BoundPredicate { ty, mut bounds } => {
+                WherePredicate::BoundPredicate { ty, mut bounds, .. } => {
                     // Writing a projection trait bound of the form
                     // <T as Trait>::Name : ?Sized
                     // is illegal, because ?Sized bounds can only
@@ -561,12 +560,11 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                 }
                 WherePredicate::EqPredicate { lhs, rhs } => {
                     match lhs {
-                        Type::QPath { name: left_name, ref self_type, ref trait_ } => {
+                        Type::QPath { name: left_name, ref self_type, ref trait_, .. } => {
                             let ty = &*self_type;
                             match **trait_ {
                                 Type::ResolvedPath {
                                     path: ref trait_path,
-                                    ref param_names,
                                     ref did,
                                     ref is_generic,
                                 } => {
@@ -613,7 +611,6 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                                         PolyTrait {
                                             trait_: Type::ResolvedPath {
                                                 path: new_trait_path,
-                                                param_names: param_names.clone(),
                                                 did: *did,
                                                 is_generic: *is_generic,
                                             },
@@ -663,8 +660,11 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                         bounds.insert(0, GenericBound::maybe_sized(self.cx));
                     }
                 }
-                GenericParamDefKind::Lifetime => {}
-                GenericParamDefKind::Const { .. } => {}
+                GenericParamDefKind::Lifetime { .. } => {}
+                GenericParamDefKind::Const { ref mut default, .. } => {
+                    // We never want something like `impl<const N: usize = 10>`
+                    default.take();
+                }
             }
         }
 

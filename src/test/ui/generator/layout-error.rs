@@ -8,7 +8,7 @@ use std::future::Future;
 
 pub struct Task<F: Future>(F);
 impl<F: Future> Task<F> {
-    fn new() -> Self {
+    const fn new() -> Self {
         todo!()
     }
     fn spawn(&self, _: impl FnOnce() -> F) {

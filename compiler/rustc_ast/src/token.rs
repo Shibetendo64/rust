@@ -495,7 +495,7 @@ impl Token {
         self.lifetime().is_some()
     }
 
-    /// Returns `true` if the token is a identifier whose name is the given
+    /// Returns `true` if the token is an identifier whose name is the given
     /// string slice.
     pub fn is_ident_named(&self, name: Symbol) -> bool {
         self.ident().map_or(false, |(ident, _)| ident.name == name)
@@ -584,6 +584,13 @@ impl Token {
     /// Returns `true` if the token is the identifier `true` or `false`.
     pub fn is_bool_lit(&self) -> bool {
         self.is_non_raw_ident_where(|id| id.name.is_bool_lit())
+    }
+
+    pub fn is_numeric_lit(&self) -> bool {
+        matches!(
+            self.kind,
+            Literal(Lit { kind: LitKind::Integer, .. }) | Literal(Lit { kind: LitKind::Float, .. })
+        )
     }
 
     /// Returns `true` if the token is a non-raw identifier for which `pred` holds.
@@ -688,16 +695,12 @@ pub enum NonterminalKind {
     Item,
     Block,
     Stmt,
-    Pat2018 {
-        /// Keep track of whether the user used `:pat2018` or `:pat` and we inferred it from the
+    PatParam {
+        /// Keep track of whether the user used `:pat_param` or `:pat` and we inferred it from the
         /// edition of the span. This is used for diagnostics.
         inferred: bool,
     },
-    Pat2021 {
-        /// Keep track of whether the user used `:pat2018` or `:pat` and we inferred it from the
-        /// edition of the span. This is used for diagnostics.
-        inferred: bool,
-    },
+    PatWithOr,
     Expr,
     Ty,
     Ident,
@@ -722,12 +725,11 @@ impl NonterminalKind {
             sym::stmt => NonterminalKind::Stmt,
             sym::pat => match edition() {
                 Edition::Edition2015 | Edition::Edition2018 => {
-                    NonterminalKind::Pat2018 { inferred: true }
+                    NonterminalKind::PatParam { inferred: true }
                 }
-                Edition::Edition2021 => NonterminalKind::Pat2021 { inferred: true },
+                Edition::Edition2021 => NonterminalKind::PatWithOr,
             },
-            sym::pat2018 => NonterminalKind::Pat2018 { inferred: false },
-            sym::pat2021 => NonterminalKind::Pat2021 { inferred: false },
+            sym::pat_param => NonterminalKind::PatParam { inferred: false },
             sym::expr => NonterminalKind::Expr,
             sym::ty => NonterminalKind::Ty,
             sym::ident => NonterminalKind::Ident,
@@ -745,10 +747,8 @@ impl NonterminalKind {
             NonterminalKind::Item => sym::item,
             NonterminalKind::Block => sym::block,
             NonterminalKind::Stmt => sym::stmt,
-            NonterminalKind::Pat2018 { inferred: false } => sym::pat2018,
-            NonterminalKind::Pat2021 { inferred: false } => sym::pat2021,
-            NonterminalKind::Pat2018 { inferred: true }
-            | NonterminalKind::Pat2021 { inferred: true } => sym::pat,
+            NonterminalKind::PatParam { inferred: false } => sym::pat_param,
+            NonterminalKind::PatParam { inferred: true } | NonterminalKind::PatWithOr => sym::pat,
             NonterminalKind::Expr => sym::expr,
             NonterminalKind::Ty => sym::ty,
             NonterminalKind::Ident => sym::ident,
@@ -783,33 +783,6 @@ impl Nonterminal {
             NtVis(vis) => vis.span,
             NtTT(tt) => tt.span(),
         }
-    }
-
-    /// This nonterminal looks like some specific enums from
-    /// `proc-macro-hack` and `procedural-masquerade` crates.
-    /// We need to maintain some special pretty-printing behavior for them due to incorrect
-    /// asserts in old versions of those crates and their wide use in the ecosystem.
-    /// See issue #73345 for more details.
-    /// FIXME(#73933): Remove this eventually.
-    pub fn pretty_printing_compatibility_hack(&self) -> bool {
-        let item = match self {
-            NtItem(item) => item,
-            NtStmt(stmt) => match &stmt.kind {
-                ast::StmtKind::Item(item) => item,
-                _ => return false,
-            },
-            _ => return false,
-        };
-
-        let name = item.ident.name;
-        if name == sym::ProceduralMasqueradeDummyType || name == sym::ProcMacroHack {
-            if let ast::ItemKind::Enum(enum_def, _) = &item.kind {
-                if let [variant] = &*enum_def.variants {
-                    return variant.ident.name == sym::Input;
-                }
-            }
-        }
-        false
     }
 }
 

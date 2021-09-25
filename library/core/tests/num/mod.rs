@@ -27,11 +27,15 @@ mod u64;
 mod u8;
 
 mod bignum;
+
+mod const_from;
 mod dec2flt;
 mod flt2dec;
+mod int_log;
 mod ops;
 mod wrapping;
 
+mod ieee754;
 mod nan;
 
 /// Adds the attribute to all items in the block.

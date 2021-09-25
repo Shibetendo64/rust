@@ -91,6 +91,14 @@ pub fn initialize_available_targets() {
         LLVMInitializeAVRAsmParser
     );
     init_target!(
+        llvm_component = "m68k",
+        LLVMInitializeM68kTargetInfo,
+        LLVMInitializeM68kTarget,
+        LLVMInitializeM68kTargetMC,
+        LLVMInitializeM68kAsmPrinter,
+        LLVMInitializeM68kAsmParser
+    );
+    init_target!(
         llvm_component = "mips",
         LLVMInitializeMipsTargetInfo,
         LLVMInitializeMipsTarget,
@@ -125,10 +133,7 @@ pub fn initialize_available_targets() {
         LLVMInitializeMSP430TargetInfo,
         LLVMInitializeMSP430Target,
         LLVMInitializeMSP430TargetMC,
-        LLVMInitializeMSP430AsmPrinter
-    );
-    init_target!(
-        all(llvm_component = "msp430", llvm_has_msp430_asm_parser),
+        LLVMInitializeMSP430AsmPrinter,
         LLVMInitializeMSP430AsmParser
     );
     init_target!(
@@ -169,5 +174,13 @@ pub fn initialize_available_targets() {
         LLVMInitializeWebAssemblyTargetMC,
         LLVMInitializeWebAssemblyAsmPrinter,
         LLVMInitializeWebAssemblyAsmParser
+    );
+    init_target!(
+        llvm_component = "bpf",
+        LLVMInitializeBPFTargetInfo,
+        LLVMInitializeBPFTarget,
+        LLVMInitializeBPFTargetMC,
+        LLVMInitializeBPFAsmPrinter,
+        LLVMInitializeBPFAsmParser
     );
 }

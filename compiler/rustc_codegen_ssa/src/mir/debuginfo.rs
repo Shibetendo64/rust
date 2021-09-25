@@ -3,10 +3,12 @@ use rustc_index::vec::IndexVec;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir;
 use rustc_middle::ty;
+use rustc_middle::ty::layout::LayoutOf;
 use rustc_session::config::DebugInfo;
 use rustc_span::symbol::{kw, Symbol};
 use rustc_span::{BytePos, Span};
-use rustc_target::abi::{LayoutOf, Size};
+use rustc_target::abi::Abi;
+use rustc_target::abi::Size;
 
 use super::operand::{OperandRef, OperandValue};
 use super::place::PlaceRef;
@@ -265,33 +267,25 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 None => continue,
             };
 
-            let mut layout = base.layout;
             let mut direct_offset = Size::ZERO;
             // FIXME(eddyb) use smallvec here.
             let mut indirect_offsets = vec![];
+            let mut place = base;
 
             for elem in &var.projection[..] {
                 match *elem {
                     mir::ProjectionElem::Deref => {
                         indirect_offsets.push(Size::ZERO);
-                        layout = bx.cx().layout_of(
-                            layout
-                                .ty
-                                .builtin_deref(true)
-                                .unwrap_or_else(|| {
-                                    span_bug!(var.source_info.span, "cannot deref `{}`", layout.ty)
-                                })
-                                .ty,
-                        );
+                        place = bx.load_operand(place).deref(bx.cx());
                     }
                     mir::ProjectionElem::Field(field, _) => {
                         let i = field.index();
                         let offset = indirect_offsets.last_mut().unwrap_or(&mut direct_offset);
-                        *offset += layout.fields.offset(i);
-                        layout = layout.field(bx.cx(), i);
+                        *offset += place.layout.fields.offset(i);
+                        place = place.project_field(bx, i);
                     }
                     mir::ProjectionElem::Downcast(_, variant) => {
-                        layout = layout.for_variant(bx.cx(), variant);
+                        place = place.project_downcast(bx, variant);
                     }
                     _ => span_bug!(
                         var.source_info.span,
@@ -301,7 +295,39 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
             }
 
-            bx.dbg_var_addr(dbg_var, dbg_loc, base.llval, direct_offset, &indirect_offsets);
+            // When targeting MSVC, create extra allocas for arguments instead of pointing multiple
+            // dbg_var_addr() calls into the same alloca with offsets. MSVC uses CodeView records
+            // not DWARF and LLVM doesn't support translating the resulting
+            // [DW_OP_deref, DW_OP_plus_uconst, offset, DW_OP_deref] debug info to CodeView.
+            // Creating extra allocas on the stack makes the resulting debug info simple enough
+            // that LLVM can generate correct CodeView records and thus the values appear in the
+            // debugger. (#83709)
+            let should_create_individual_allocas = bx.cx().sess().target.is_like_msvc
+                && self.mir.local_kind(local) == mir::LocalKind::Arg
+                // LLVM can handle simple things but anything more complex than just a direct
+                // offset or one indirect offset of 0 is too complex for it to generate CV records
+                // correctly.
+                && (direct_offset != Size::ZERO
+                    || !matches!(&indirect_offsets[..], [Size::ZERO] | []));
+
+            if should_create_individual_allocas {
+                // Create a variable which will be a pointer to the actual value
+                let ptr_ty = bx.tcx().mk_ty(ty::RawPtr(ty::TypeAndMut {
+                    mutbl: mir::Mutability::Mut,
+                    ty: place.layout.ty,
+                }));
+                let ptr_layout = bx.layout_of(ptr_ty);
+                let alloca = PlaceRef::alloca(bx, ptr_layout);
+                bx.set_var_name(alloca.llval, &(var.name.to_string() + ".dbg.spill"));
+
+                // Write the pointer to the variable
+                bx.store(place.llval, alloca.llval, alloca.align);
+
+                // Point the debug info to `*alloca` for the current variable
+                bx.dbg_var_addr(dbg_var, dbg_loc, alloca.llval, Size::ZERO, &[Size::ZERO]);
+            } else {
+                bx.dbg_var_addr(dbg_var, dbg_loc, base.llval, direct_offset, &indirect_offsets);
+            }
         }
     }
 
@@ -344,21 +370,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         {
                             let arg_index = place.local.index() - 1;
                             if target_is_msvc {
-                                // Rust compiler decomposes every &str or slice argument into two components:
-                                // a pointer to the memory address where the data is stored and a usize representing
-                                // the length of the str (or slice). These components will later be used to reconstruct
-                                // the original argument inside the body of the function that owns it (see the
-                                // definition of debug_introduce_local for more details).
-                                //
-                                // Since the original argument is declared inside a function rather than being passed
-                                // in as an argument, it must be marked as a LocalVariable for MSVC debuggers to visualize
-                                // its data correctly. (See issue #81894 for an in-depth description of the problem).
-                                match *var_ty.kind() {
-                                    ty::Ref(_, inner_type, _) => match *inner_type.kind() {
-                                        ty::Slice(_) | ty::Str => VariableKind::LocalVariable,
-                                        _ => VariableKind::ArgumentVariable(arg_index + 1),
-                                    },
-                                    _ => VariableKind::ArgumentVariable(arg_index + 1),
+                                // ScalarPair parameters are spilled to the stack so they need to
+                                // be marked as a `LocalVariable` for MSVC debuggers to visualize
+                                // their data correctly. (See #81894 & #88625)
+                                let var_ty_layout = self.cx.layout_of(var_ty);
+                                if let Abi::ScalarPair(_, _) = var_ty_layout.abi {
+                                    VariableKind::LocalVariable
+                                } else {
+                                    VariableKind::ArgumentVariable(arg_index + 1)
                                 }
                             } else {
                                 // FIXME(eddyb) shouldn't `ArgumentVariable` indices be
@@ -372,7 +391,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         (var_ty, var_kind)
                     }
                     mir::VarDebugInfoContents::Const(c) => {
-                        let ty = self.monomorphize(c.literal.ty);
+                        let ty = self.monomorphize(c.ty());
                         (ty, VariableKind::LocalVariable)
                     }
                 };

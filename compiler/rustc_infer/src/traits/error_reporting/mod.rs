@@ -9,6 +9,7 @@ use rustc_middle::ty::TyCtxt;
 use rustc_span::symbol::Symbol;
 use rustc_span::{MultiSpan, Span};
 use std::fmt;
+use std::iter;
 
 impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     pub fn report_extra_impl_obligation(
@@ -82,10 +83,6 @@ pub fn report_object_safety_error(
                     messages.push(msg.clone());
                 }
             }
-            if trait_span.is_some() {
-                // Only provide the help if its a local trait, otherwise it's not actionable.
-                violation.solution(&mut err);
-            }
         }
     }
     let has_multi_span = !multi_span.is_empty();
@@ -94,7 +91,7 @@ pub fn report_object_safety_error(
         note_span
             .push_span_label(trait_span, "this trait cannot be made into an object...".to_string());
     }
-    for (span, msg) in multi_span.into_iter().zip(messages.into_iter()) {
+    for (span, msg) in iter::zip(multi_span, messages) {
         note_span.push_span_label(span, msg);
     }
     err.span_note(
@@ -103,11 +100,13 @@ pub fn report_object_safety_error(
          to be resolvable dynamically; for more information visit \
          <https://doc.rust-lang.org/reference/items/traits.html#object-safety>",
     );
-
-    if tcx.sess.trait_methods_not_found.borrow().contains(&span) {
-        // Avoid emitting error caused by non-existing method (#58734)
-        err.cancel();
+    if trait_span.is_some() {
+        let mut reported_violations: Vec<_> = reported_violations.into_iter().collect();
+        reported_violations.sort();
+        for violation in reported_violations {
+            // Only provide the help if its a local trait, otherwise it's not actionable.
+            violation.solution(&mut err);
+        }
     }
-
     err
 }

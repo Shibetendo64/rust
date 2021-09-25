@@ -336,7 +336,7 @@
 //! This will print the numbers `0` through `4`, each on their own line.
 //!
 //! Bear in mind that methods on infinite iterators, even those for which a
-//! result can be determined mathematically in finite time, may not terminate.
+//! result can be determined mathematically in finite time, might not terminate.
 //! Specifically, methods such as [`min`], which in the general case require
 //! traversing every element in the iterator, are likely not to return
 //! successfully for any infinite iterators.
@@ -384,18 +384,22 @@ pub use self::traits::FusedIterator;
 pub use self::traits::InPlaceIterable;
 #[unstable(feature = "trusted_len", issue = "37572")]
 pub use self::traits::TrustedLen;
+#[unstable(feature = "trusted_step", issue = "85731")]
+pub use self::traits::TrustedStep;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::traits::{
     DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Product, Sum,
 };
 
+#[unstable(feature = "iter_zip", issue = "83574")]
+pub use self::adapters::zip;
 #[stable(feature = "iter_cloned", since = "1.1.0")]
 pub use self::adapters::Cloned;
 #[stable(feature = "iter_copied", since = "1.36.0")]
 pub use self::adapters::Copied;
 #[stable(feature = "iterator_flatten", since = "1.29.0")]
 pub use self::adapters::Flatten;
-#[unstable(feature = "iter_map_while", reason = "recently added", issue = "68537")]
+#[stable(feature = "iter_map_while", since = "1.57.0")]
 pub use self::adapters::MapWhile;
 #[unstable(feature = "inplace_iteration", issue = "none")]
 pub use self::adapters::SourceIter;
@@ -403,12 +407,14 @@ pub use self::adapters::SourceIter;
 pub use self::adapters::StepBy;
 #[unstable(feature = "trusted_random_access", issue = "none")]
 pub use self::adapters::TrustedRandomAccess;
+#[unstable(feature = "trusted_random_access", issue = "none")]
+pub use self::adapters::TrustedRandomAccessNoCoerce;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::adapters::{
     Chain, Cycle, Enumerate, Filter, FilterMap, FlatMap, Fuse, Inspect, Map, Peekable, Rev, Scan,
     Skip, SkipWhile, Take, TakeWhile, Zip,
 };
-#[unstable(feature = "iter_intersperse", reason = "recently added", issue = "79524")]
+#[stable(feature = "iter_intersperse", since = "1.56.0")]
 pub use self::adapters::{Intersperse, IntersperseWith};
 
 pub(crate) use self::adapters::process_results;

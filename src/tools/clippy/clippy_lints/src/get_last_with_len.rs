@@ -1,6 +1,9 @@
 //! lint on using `x.get(x.len() - 1)` instead of `x.last()`
 
-use crate::utils::{is_type_diagnostic_item, snippet_with_applicability, span_lint_and_sugg, SpanlessEq};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::source::snippet_with_applicability;
+use clippy_utils::ty::is_type_diagnostic_item;
+use clippy_utils::SpanlessEq;
 use if_chain::if_chain;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
@@ -11,10 +14,12 @@ use rustc_span::source_map::Spanned;
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for using `x.get(x.len() - 1)` instead of
+    /// ### What it does
+    /// Checks for using `x.get(x.len() - 1)` instead of
     /// `x.last()`.
     ///
-    /// **Why is this bad?** Using `x.last()` is easier to read and has the same
+    /// ### Why is this bad?
+    /// Using `x.last()` is easier to read and has the same
     /// result.
     ///
     /// Note that using `x[x.len() - 1]` is semantically different from
@@ -24,10 +29,7 @@ declare_clippy_lint! {
     /// There is another lint (get_unwrap) that covers the case of using
     /// `x.get(index).unwrap()` instead of `x[index]`.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// // Bad
     /// let x = vec![2, 3, 5];
@@ -48,7 +50,7 @@ impl<'tcx> LateLintPass<'tcx> for GetLastWithLen {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if_chain! {
             // Is a method call
-            if let ExprKind::MethodCall(ref path, _, ref args, _) = expr.kind;
+            if let ExprKind::MethodCall(path, _, args, _) = expr.kind;
 
             // Method name is "get"
             if path.ident.name == sym!(get);
@@ -71,7 +73,7 @@ impl<'tcx> LateLintPass<'tcx> for GetLastWithLen {
 
             // LHS of subtraction is "x.len()"
             if let ExprKind::MethodCall(arg_lhs_path, _, lhs_args, _) = &lhs.kind;
-            if arg_lhs_path.ident.name == sym!(len);
+            if arg_lhs_path.ident.name == sym::len;
             if let Some(arg_lhs_struct) = lhs_args.get(0);
 
             // The two vectors referenced (x in x.get(...) and in x.len())

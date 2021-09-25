@@ -88,26 +88,28 @@ Book][unstable-doc-cfg] and [its tracking issue][issue-doc-cfg].
 [unstable-doc-cfg]: ../unstable-book/language-features/doc-cfg.html
 [issue-doc-cfg]: https://github.com/rust-lang/rust/issues/43781
 
-### Adding your trait to the "Important Traits" dialog
+### Adding your trait to the "Notable traits" dialog
 
-Rustdoc keeps a list of a few traits that are believed to be "fundamental" to a given type when
-implemented on it. These traits are intended to be the primary interface for their types, and are
-often the only thing available to be documented on their types. For this reason, Rustdoc will track
-when a given type implements one of these traits and call special attention to it when a function
-returns one of these types. This is the "Important Traits" dialog, visible as a circle-i button next
-to the function, which, when clicked, shows the dialog.
+Rustdoc keeps a list of a few traits that are believed to be "fundamental" to
+types that implement them. These traits are intended to be the primary interface
+for their implementers, and are often most of the API available to be documented
+on their types. For this reason, Rustdoc will track when a given type implements
+one of these traits and call special attention to it when a function returns one
+of these types. This is the "Notable traits" dialog, accessible as a circled `i`
+button next to the function, which, when clicked, shows the dialog.
 
-In the standard library, the traits that qualify for inclusion are `Iterator`, `io::Read`, and
-`io::Write`. However, rather than being implemented as a hard-coded list, these traits have a
-special marker attribute on them: `#[doc(spotlight)]`. This means that you could apply this
-attribute to your own trait to include it in the "Important Traits" dialog in documentation.
+In the standard library, some of the traits that are part of this list are
+`Iterator`, `Future`, `io::Read`, and `io::Write`. However, rather than being
+implemented as a hard-coded list, these traits have a special marker attribute
+on them: `#[doc(notable_trait)]`. This means that you can apply this attribute
+to your own trait to include it in the "Notable traits" dialog in documentation.
 
-The `#[doc(spotlight)]` attribute currently requires the `#![feature(doc_spotlight)]` feature gate.
-For more information, see [its chapter in the Unstable Book][unstable-spotlight] and [its tracking
-issue][issue-spotlight].
+The `#[doc(notable_trait)]` attribute currently requires the `#![feature(doc_notable_trait)]`
+feature gate. For more information, see [its chapter in the Unstable Book][unstable-notable_trait]
+and [its tracking issue][issue-notable_trait].
 
-[unstable-spotlight]: ../unstable-book/language-features/doc-spotlight.html
-[issue-spotlight]: https://github.com/rust-lang/rust/issues/45040
+[unstable-notable_trait]: ../unstable-book/language-features/doc-notable-trait.html
+[issue-notable_trait]: https://github.com/rust-lang/rust/issues/45040
 
 ### Exclude certain dependencies from documentation
 
@@ -129,21 +131,12 @@ Book][unstable-masked] and [its tracking issue][issue-masked].
 [unstable-masked]: ../unstable-book/language-features/doc-masked.html
 [issue-masked]: https://github.com/rust-lang/rust/issues/44027
 
-### Include external files as API documentation
 
-As designed in [RFC 1990], Rustdoc can read an external file to use as a type's documentation. This
-is useful if certain documentation is so long that it would break the flow of reading the source.
-Instead of writing it all inline, writing `#[doc(include = "sometype.md")]` will ask Rustdoc to
-instead read that file and use it as if it were written inline.
+## Document primitives
 
-[RFC 1990]: https://github.com/rust-lang/rfcs/pull/1990
-
-`#[doc(include = "...")]` currently requires the `#![feature(external_doc)]` feature gate. For more
-information, see [its chapter in the Unstable Book][unstable-include] and [its tracking
-issue][issue-include].
-
-[unstable-include]: ../unstable-book/language-features/external-doc.html
-[issue-include]: https://github.com/rust-lang/rust/issues/44732
+Since primitive types are defined in the compiler, there's no place to attach documentation
+attributes. The `#[doc(primitive)]` attribute is used by the standard library to provide a way to generate
+documentation for primitive types, and requires `#![feature(doc_primitive)]` to enable.
 
 ## Unstable command-line arguments
 
@@ -216,6 +209,22 @@ some consideration for their stability, and names that end in a number). Giving 
 `rustdoc` will disable this sorting and instead make it print the items in the order they appear in
 the source.
 
+### `--show-type-layout`: add a section to each type's docs describing its memory layout
+
+Using this flag looks like this:
+
+```bash
+$ rustdoc src/lib.rs -Z unstable-options --show-type-layout
+```
+
+When this flag is passed, rustdoc will add a "Layout" section at the bottom of
+each type's docs page that includes a summary of the type's memory layout as
+computed by rustc. For example, rustdoc will show the size in bytes that a value
+of that type will take in memory.
+
+Note that most layout information is **completely unstable** and may even differ
+between compilations.
+
 ### `--resource-suffix`: modifying the name of CSS/JavaScript in crate docs
 
 Using this flag looks like this:
@@ -229,13 +238,13 @@ all these files are linked from every page, changing where they are can be cumbe
 specially cache them. This flag will rename all these files in the output to include the suffix in
 the filename. For example, `light.css` would become `light-suf.css` with the above command.
 
-### `--display-warnings`: display warnings when documenting or running documentation tests
+### `--display-doctest-warnings`: display warnings when documenting or running documentation tests
 
 Using this flag looks like this:
 
 ```bash
-$ rustdoc src/lib.rs -Z unstable-options --display-warnings
-$ rustdoc --test src/lib.rs -Z unstable-options --display-warnings
+$ rustdoc src/lib.rs -Z unstable-options --display-doctest-warnings
+$ rustdoc --test src/lib.rs -Z unstable-options --display-doctest-warnings
 ```
 
 The intent behind this flag is to allow the user to see warnings that occur within their library or
@@ -340,7 +349,7 @@ Some methodology notes about what rustdoc counts in this metric:
 Public items that are not documented can be seen with the built-in `missing_docs` lint. Private
 items that are not documented can be seen with Clippy's `missing_docs_in_private_items` lint.
 
-## `-w`/`--output-format`: output format
+### `-w`/`--output-format`: output format
 
 When using
 [`--show-coverage`](https://doc.rust-lang.org/nightly/rustdoc/unstable-features.html#--show-coverage-get-statistics-about-code-documentation-coverage),

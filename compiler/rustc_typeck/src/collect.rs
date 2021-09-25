@@ -1,4 +1,3 @@
-// ignore-tidy-filelength
 //! "Collection" is the process of determining the type and other external
 //! details of each item in Rust. Collection is specifically concerned
 //! with *inter-procedural* things -- for example, for a function
@@ -15,13 +14,14 @@
 //! At present, however, we do run collection across all items in the
 //! crate as a kind of pass. This should eventually be factored away.
 
-use crate::astconv::{AstConv, SizedByDefault};
+use crate::astconv::AstConv;
 use crate::bounds::Bounds;
 use crate::check::intrinsic::intrinsic_operation_unsafety;
 use crate::constrained_generic_params as cgp;
 use crate::errors;
 use crate::middle::resolve_lifetime as rl;
 use rustc_ast as ast;
+use rustc_ast::Attribute;
 use rustc_ast::{MetaItemKind, NestedMetaItem};
 use rustc_attr::{list_contains_name, InlineAttr, InstructionSetAttr, OptimizeAttr};
 use rustc_data_structures::captures::Captures;
@@ -33,7 +33,6 @@ use rustc_hir::def_id::{DefId, LocalDefId, LOCAL_CRATE};
 use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
 use rustc_hir::weak_lang_items;
 use rustc_hir::{GenericParamKind, HirId, Node};
-use rustc_middle::hir::map::blocks::FnLikeNode;
 use rustc_middle::hir::map::Map;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::mir::mono::Linkage;
@@ -41,15 +40,15 @@ use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::util::Discr;
 use rustc_middle::ty::util::IntTypeExt;
-use rustc_middle::ty::{self, AdtKind, Const, DefIdTree, ToPolyTraitRef, Ty, TyCtxt};
+use rustc_middle::ty::{self, AdtKind, Const, DefIdTree, Ty, TyCtxt};
 use rustc_middle::ty::{ReprOptions, ToPredicate, WithConstness};
-use rustc_session::config::SanitizerSet;
 use rustc_session::lint;
 use rustc_session::parse::feature_err;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
-use rustc_target::spec::abi;
+use rustc_target::spec::{abi, PanicStrategy, SanitizerSet};
 use rustc_trait_selection::traits::error_reporting::suggestions::NextTypeParamName;
+use std::iter;
 
 mod item_bounds;
 mod type_of;
@@ -69,13 +68,13 @@ fn collect_mod_item_types(tcx: TyCtxt<'_>, module_def_id: LocalDefId) {
 pub fn provide(providers: &mut Providers) {
     *providers = Providers {
         opt_const_param_of: type_of::opt_const_param_of,
+        default_anon_const_substs: type_of::default_anon_const_substs,
         type_of: type_of::type_of,
         item_bounds: item_bounds::item_bounds,
         explicit_item_bounds: item_bounds::explicit_item_bounds,
         generics_of,
         predicates_of,
         predicates_defined_on,
-        projection_ty_from_predicates,
         explicit_predicates_of,
         super_predicates_of,
         super_predicates_that_define_assoc_type,
@@ -91,6 +90,7 @@ pub fn provide(providers: &mut Providers) {
         generator_kind,
         codegen_fn_attrs,
         collect_mod_item_types,
+        should_inherit_track_caller,
         ..*providers
     };
 }
@@ -128,6 +128,16 @@ impl<'v> Visitor<'v> for PlaceholderHirTyCollector {
         }
         intravisit::walk_ty(self, t)
     }
+    fn visit_generic_arg(&mut self, generic_arg: &'v hir::GenericArg<'v>) {
+        match generic_arg {
+            hir::GenericArg::Infer(inf) => {
+                self.0.push(inf.span);
+                intravisit::walk_inf(self, inf);
+            }
+            hir::GenericArg::Type(t) => self.visit_ty(t),
+            _ => {}
+        }
+    }
 }
 
 struct CollectItemTypesVisitor<'tcx> {
@@ -144,6 +154,7 @@ crate fn placeholder_type_error(
     placeholder_types: Vec<Span>,
     suggest: bool,
     hir_ty: Option<&hir::Ty<'_>>,
+    kind: &'static str,
 ) {
     if placeholder_types.is_empty() {
         return;
@@ -173,13 +184,12 @@ crate fn placeholder_type_error(
         ));
     }
 
-    let mut err = bad_placeholder_type(tcx, placeholder_types);
+    let mut err = bad_placeholder_type(tcx, placeholder_types, kind);
 
     // Suggest, but only if it is not a function in const or static
     if suggest {
         let mut is_fn = false;
-        let mut is_const = false;
-        let mut is_static = false;
+        let mut is_const_or_static = false;
 
         if let Some(hir_ty) = hir_ty {
             if let hir::TyKind::BareFn(_) = hir_ty.kind {
@@ -189,19 +199,26 @@ crate fn placeholder_type_error(
                 let parent_id = tcx.hir().get_parent_node(hir_ty.hir_id);
                 let parent_node = tcx.hir().get(parent_id);
 
-                if let hir::Node::Item(item) = parent_node {
-                    if let hir::ItemKind::Const(_, _) = item.kind {
-                        is_const = true;
-                    } else if let hir::ItemKind::Static(_, _, _) = item.kind {
-                        is_static = true;
-                    }
-                }
+                is_const_or_static = match parent_node {
+                    Node::Item(&hir::Item {
+                        kind: hir::ItemKind::Const(..) | hir::ItemKind::Static(..),
+                        ..
+                    })
+                    | Node::TraitItem(&hir::TraitItem {
+                        kind: hir::TraitItemKind::Const(..),
+                        ..
+                    })
+                    | Node::ImplItem(&hir::ImplItem {
+                        kind: hir::ImplItemKind::Const(..), ..
+                    }) => true,
+                    _ => false,
+                };
             }
         }
 
         // if function is wrapped around a const or static,
         // then don't show the suggestion
-        if !(is_fn && (is_const || is_static)) {
+        if !(is_fn && is_const_or_static) {
             err.multipart_suggestion(
                 "use type parameters instead",
                 sugg,
@@ -229,7 +246,15 @@ fn reject_placeholder_type_signatures_in_item(tcx: TyCtxt<'tcx>, item: &'tcx hir
     let mut visitor = PlaceholderHirTyCollector::default();
     visitor.visit_item(item);
 
-    placeholder_type_error(tcx, Some(generics.span), generics.params, visitor.0, suggest, None);
+    placeholder_type_error(
+        tcx,
+        Some(generics.span),
+        generics.params,
+        visitor.0,
+        suggest,
+        None,
+        item.kind.descr(),
+    );
 }
 
 impl Visitor<'tcx> for CollectItemTypesVisitor<'tcx> {
@@ -254,10 +279,15 @@ impl Visitor<'tcx> for CollectItemTypesVisitor<'tcx> {
                     self.tcx.ensure().type_of(def_id);
                 }
                 hir::GenericParamKind::Type { .. } => {}
-                hir::GenericParamKind::Const { .. } => {
+                hir::GenericParamKind::Const { default, .. } => {
                     let def_id = self.tcx.hir().local_def_id(param.hir_id);
                     self.tcx.ensure().type_of(def_id);
-                    // FIXME(const_generics_defaults)
+                    if let Some(default) = default {
+                        let default_def_id = self.tcx.hir().local_def_id(default.hir_id);
+                        // need to store default and type of default
+                        self.tcx.ensure().type_of(default_def_id);
+                        self.tcx.ensure().const_param_default(def_id);
+                    }
                 }
             }
         }
@@ -290,13 +320,17 @@ impl Visitor<'tcx> for CollectItemTypesVisitor<'tcx> {
 fn bad_placeholder_type(
     tcx: TyCtxt<'tcx>,
     mut spans: Vec<Span>,
+    kind: &'static str,
 ) -> rustc_errors::DiagnosticBuilder<'tcx> {
+    let kind = if kind.ends_with('s') { format!("{}es", kind) } else { format!("{}s", kind) };
+
     spans.sort();
     let mut err = struct_span_err!(
         tcx.sess,
         spans.clone(),
         E0121,
-        "the type placeholder `_` is not allowed within types on item signatures",
+        "the type placeholder `_` is not allowed within types on item signatures for {}",
+        kind
     );
     for span in spans {
         err.span_label(span, "not allowed in type signatures");
@@ -310,7 +344,7 @@ impl ItemCtxt<'tcx> {
     }
 
     pub fn to_ty(&self, ast_ty: &hir::Ty<'_>) -> Ty<'tcx> {
-        AstConv::ast_ty_to_ty(self, ast_ty)
+        <dyn AstConv<'_>>::ast_ty_to_ty(self, ast_ty)
     }
 
     pub fn hir_id(&self) -> hir::HirId {
@@ -329,14 +363,6 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
 
     fn item_def_id(&self) -> Option<DefId> {
         Some(self.item_def_id)
-    }
-
-    fn default_constness_for_trait_bounds(&self) -> hir::Constness {
-        if let Some(fn_like) = FnLikeNode::from_node(self.node()) {
-            fn_like.constness()
-        } else {
-            hir::Constness::NotConst
-        }
     }
 
     fn get_type_parameter_bounds(
@@ -370,7 +396,7 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
         _: Option<&ty::GenericParamDef>,
         span: Span,
     ) -> &'tcx Const<'tcx> {
-        bad_placeholder_type(self.tcx(), vec![span]).emit();
+        bad_placeholder_type(self.tcx(), vec![span], "generic").emit();
         // Typeck doesn't expect erased regions to be returned from `type_of`.
         let ty = self.tcx.fold_regions(ty, &mut false, |r, _| match r {
             ty::ReErased => self.tcx.lifetimes.re_static,
@@ -424,9 +450,9 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
                             let suggestions = vec![
                                 (lt_sp, sugg),
                                 (
-                                    span,
+                                    span.with_hi(item_segment.ident.span.lo()),
                                     format!(
-                                        "{}::{}",
+                                        "{}::",
                                         // Replace the existing lifetimes with a new named lifetime.
                                         self.tcx
                                             .replace_late_bound_regions(poly_trait_ref, |_| {
@@ -439,7 +465,6 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
                                                 ))
                                             })
                                             .0,
-                                        item_segment.ident
                                     ),
                                 ),
                             ];
@@ -461,14 +486,13 @@ impl AstConv<'tcx> for ItemCtxt<'tcx> {
                 | hir::Node::ForeignItem(_)
                 | hir::Node::TraitItem(_)
                 | hir::Node::ImplItem(_) => {
-                    err.span_suggestion(
-                        span,
+                    err.span_suggestion_verbose(
+                        span.with_hi(item_segment.ident.span.lo()),
                         "use a fully qualified path with inferred lifetimes",
                         format!(
-                            "{}::{}",
+                            "{}::",
                             // Erase named lt, we want `<A as B<'_>::C`, not `<A as B<'a>::C`.
                             self.tcx.anonymize_late_bound_regions(poly_trait_ref).skip_binder(),
-                            item_segment.ident
                         ),
                         Applicability::MaybeIncorrect,
                     );
@@ -612,7 +636,7 @@ fn type_param_predicates(
         )
         .into_iter()
         .filter(|(predicate, _)| match predicate.kind().skip_binder() {
-            ty::PredicateKind::Trait(data, _) => data.self_ty().is_param(index),
+            ty::PredicateKind::Trait(data) => data.self_ty().is_param(index),
             _ => false,
         }),
     );
@@ -634,7 +658,6 @@ impl ItemCtxt<'tcx> {
         only_self_bounds: OnlySelfBounds,
         assoc_name: Option<Ident>,
     ) -> Vec<(ty::Predicate<'tcx>, Span)> {
-        let constness = self.default_constness_for_trait_bounds();
         let from_ty_params = ast_generics
             .params
             .iter()
@@ -647,7 +670,7 @@ impl ItemCtxt<'tcx> {
                 Some(assoc_name) => self.bound_defines_assoc_item(b, assoc_name),
                 None => true,
             })
-            .flat_map(|b| predicates_from_bound(self, ty, b, constness));
+            .flat_map(|b| predicates_from_bound(self, ty, b));
 
         let from_where_clauses = ast_generics
             .where_clause
@@ -673,7 +696,7 @@ impl ItemCtxt<'tcx> {
                     })
                     .filter_map(move |b| bt.map(|bt| (bt, b)))
             })
-            .flat_map(|(bt, b)| predicates_from_bound(self, bt, b, constness));
+            .flat_map(|(bt, b)| predicates_from_bound(self, bt, b));
 
         from_ty_params.chain(from_where_clauses).collect()
     }
@@ -721,6 +744,7 @@ fn convert_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
         // These don't define types.
         hir::ItemKind::ExternCrate(_)
         | hir::ItemKind::Use(..)
+        | hir::ItemKind::Macro(_)
         | hir::ItemKind::Mod(_)
         | hir::ItemKind::GlobalAsm(_) => {}
         hir::ItemKind::ForeignMod { items, .. } => {
@@ -729,8 +753,22 @@ fn convert_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
                 tcx.ensure().generics_of(item.def_id);
                 tcx.ensure().type_of(item.def_id);
                 tcx.ensure().predicates_of(item.def_id);
-                if let hir::ForeignItemKind::Fn(..) = item.kind {
-                    tcx.ensure().fn_sig(item.def_id);
+                match item.kind {
+                    hir::ForeignItemKind::Fn(..) => tcx.ensure().fn_sig(item.def_id),
+                    hir::ForeignItemKind::Static(..) => {
+                        let mut visitor = PlaceholderHirTyCollector::default();
+                        visitor.visit_foreign_item(item);
+                        placeholder_type_error(
+                            tcx,
+                            None,
+                            &[],
+                            visitor.0,
+                            false,
+                            None,
+                            "static variable",
+                        );
+                    }
+                    _ => (),
                 }
             }
         }
@@ -795,6 +833,22 @@ fn convert_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
             match it.kind {
                 hir::ItemKind::Fn(..) => tcx.ensure().fn_sig(def_id),
                 hir::ItemKind::OpaqueTy(..) => tcx.ensure().item_bounds(def_id),
+                hir::ItemKind::Const(ty, ..) | hir::ItemKind::Static(ty, ..) => {
+                    // (#75889): Account for `const C: dyn Fn() -> _ = "";`
+                    if let hir::TyKind::TraitObject(..) = ty.kind {
+                        let mut visitor = PlaceholderHirTyCollector::default();
+                        visitor.visit_item(it);
+                        placeholder_type_error(
+                            tcx,
+                            None,
+                            &[],
+                            visitor.0,
+                            false,
+                            None,
+                            it.kind.descr(),
+                        );
+                    }
+                }
                 _ => (),
             }
         }
@@ -820,7 +874,7 @@ fn convert_trait_item(tcx: TyCtxt<'_>, trait_item_id: hir::TraitItemId) {
             // Account for `const C: _;`.
             let mut visitor = PlaceholderHirTyCollector::default();
             visitor.visit_trait_item(trait_item);
-            placeholder_type_error(tcx, None, &[], visitor.0, false, None);
+            placeholder_type_error(tcx, None, &[], visitor.0, false, None, "constant");
         }
 
         hir::TraitItemKind::Type(_, Some(_)) => {
@@ -829,7 +883,7 @@ fn convert_trait_item(tcx: TyCtxt<'_>, trait_item_id: hir::TraitItemId) {
             // Account for `type T = _;`.
             let mut visitor = PlaceholderHirTyCollector::default();
             visitor.visit_trait_item(trait_item);
-            placeholder_type_error(tcx, None, &[], visitor.0, false, None);
+            placeholder_type_error(tcx, None, &[], visitor.0, false, None, "associated type");
         }
 
         hir::TraitItemKind::Type(_, None) => {
@@ -839,7 +893,7 @@ fn convert_trait_item(tcx: TyCtxt<'_>, trait_item_id: hir::TraitItemId) {
             let mut visitor = PlaceholderHirTyCollector::default();
             visitor.visit_trait_item(trait_item);
 
-            placeholder_type_error(tcx, None, &[], visitor.0, false, None);
+            placeholder_type_error(tcx, None, &[], visitor.0, false, None, "associated type");
         }
     };
 
@@ -861,7 +915,7 @@ fn convert_impl_item(tcx: TyCtxt<'_>, impl_item_id: hir::ImplItemId) {
             let mut visitor = PlaceholderHirTyCollector::default();
             visitor.visit_impl_item(impl_item);
 
-            placeholder_type_error(tcx, None, &[], visitor.0, false, None);
+            placeholder_type_error(tcx, None, &[], visitor.0, false, None, "associated type");
         }
         hir::ImplItemKind::Const(..) => {}
     }
@@ -1096,16 +1150,14 @@ fn super_predicates_that_define_assoc_type(
         // Convert the bounds that follow the colon, e.g., `Bar + Zed` in `trait Foo: Bar + Zed`.
         let self_param_ty = tcx.types.self_param;
         let superbounds1 = if let Some(assoc_name) = assoc_name {
-            AstConv::compute_bounds_that_match_assoc_type(
+            <dyn AstConv<'_>>::compute_bounds_that_match_assoc_type(
                 &icx,
                 self_param_ty,
                 &bounds,
-                SizedByDefault::No,
-                item.span,
                 assoc_name,
             )
         } else {
-            AstConv::compute_bounds(&icx, self_param_ty, &bounds, SizedByDefault::No, item.span)
+            <dyn AstConv<'_>>::compute_bounds(&icx, self_param_ty, &bounds)
         };
 
         let superbounds1 = superbounds1.predicates(tcx, self_param_ty);
@@ -1134,7 +1186,7 @@ fn super_predicates_that_define_assoc_type(
             // which will, in turn, reach indirect supertraits.
             for &(pred, span) in superbounds {
                 debug!("superbound: {:?}", pred);
-                if let ty::PredicateKind::Trait(bound, _) = pred.kind().skip_binder() {
+                if let ty::PredicateKind::Trait(bound) = pred.kind().skip_binder() {
                     tcx.at(span).super_predicates_of(bound.def_id());
                 }
             }
@@ -1172,6 +1224,8 @@ fn trait_def(tcx: TyCtxt<'_>, def_id: DefId) -> ty::TraitDef {
     }
 
     let is_marker = tcx.has_attr(def_id, sym::marker);
+    let skip_array_during_method_dispatch =
+        tcx.has_attr(def_id, sym::rustc_skip_array_during_method_dispatch);
     let spec_kind = if tcx.has_attr(def_id, sym::rustc_unsafe_specialization_marker) {
         ty::trait_def::TraitSpecializationKind::Marker
     } else if tcx.has_attr(def_id, sym::rustc_specialization_trait) {
@@ -1180,7 +1234,16 @@ fn trait_def(tcx: TyCtxt<'_>, def_id: DefId) -> ty::TraitDef {
         ty::trait_def::TraitSpecializationKind::None
     };
     let def_path_hash = tcx.def_path_hash(def_id);
-    ty::TraitDef::new(def_id, unsafety, paren_sugar, is_auto, is_marker, spec_kind, def_path_hash)
+    ty::TraitDef::new(
+        def_id,
+        unsafety,
+        paren_sugar,
+        is_auto,
+        is_marker,
+        skip_array_during_method_dispatch,
+        spec_kind,
+        def_path_hash,
+    )
 }
 
 fn has_late_bound_regions<'tcx>(tcx: TyCtxt<'tcx>, node: Node<'tcx>) -> Option<Span> {
@@ -1232,7 +1295,8 @@ fn has_late_bound_regions<'tcx>(tcx: TyCtxt<'tcx>, node: Node<'tcx>) -> Option<S
             match self.tcx.named_region(lt.hir_id) {
                 Some(rl::Region::Static | rl::Region::EarlyBound(..)) => {}
                 Some(
-                    rl::Region::LateBound(debruijn, _, _) | rl::Region::LateBoundAnon(debruijn, _),
+                    rl::Region::LateBound(debruijn, _, _, _)
+                    | rl::Region::LateBoundAnon(debruijn, _, _),
                 ) if debruijn < self.outer_index => {}
                 Some(
                     rl::Region::LateBound(..)
@@ -1296,13 +1360,13 @@ fn has_late_bound_regions<'tcx>(tcx: TyCtxt<'tcx>, node: Node<'tcx>) -> Option<S
     }
 }
 
-struct AnonConstInParamListDetector {
-    in_param_list: bool,
-    found_anon_const_in_list: bool,
+struct AnonConstInParamTyDetector {
+    in_param_ty: bool,
+    found_anon_const_in_param_ty: bool,
     ct: HirId,
 }
 
-impl<'v> Visitor<'v> for AnonConstInParamListDetector {
+impl<'v> Visitor<'v> for AnonConstInParamTyDetector {
     type Map = intravisit::ErasedMap<'v>;
 
     fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
@@ -1310,15 +1374,17 @@ impl<'v> Visitor<'v> for AnonConstInParamListDetector {
     }
 
     fn visit_generic_param(&mut self, p: &'v hir::GenericParam<'v>) {
-        let prev = self.in_param_list;
-        self.in_param_list = true;
-        intravisit::walk_generic_param(self, p);
-        self.in_param_list = prev;
+        if let GenericParamKind::Const { ref ty, default: _ } = p.kind {
+            let prev = self.in_param_ty;
+            self.in_param_ty = true;
+            self.visit_ty(ty);
+            self.in_param_ty = prev;
+        }
     }
 
     fn visit_anon_const(&mut self, c: &'v hir::AnonConst) {
-        if self.in_param_list && self.ct == c.hir_id {
-            self.found_anon_const_in_list = true;
+        if self.in_param_ty && self.ct == c.hir_id {
+            self.found_anon_const_in_param_ty = true;
         } else {
             intravisit::walk_anon_const(self, c)
         }
@@ -1346,31 +1412,74 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::Generics {
             let parent_id = tcx.hir().get_parent_item(hir_id);
             let parent_def_id = tcx.hir().local_def_id(parent_id);
 
-            let mut in_param_list = false;
+            let mut in_param_ty = false;
             for (_parent, node) in tcx.hir().parent_iter(hir_id) {
                 if let Some(generics) = node.generics() {
-                    let mut visitor = AnonConstInParamListDetector {
-                        in_param_list: false,
-                        found_anon_const_in_list: false,
+                    let mut visitor = AnonConstInParamTyDetector {
+                        in_param_ty: false,
+                        found_anon_const_in_param_ty: false,
                         ct: hir_id,
                     };
 
                     visitor.visit_generics(generics);
-                    in_param_list = visitor.found_anon_const_in_list;
+                    in_param_ty = visitor.found_anon_const_in_param_ty;
                     break;
                 }
             }
 
-            if in_param_list {
+            if in_param_ty {
                 // We do not allow generic parameters in anon consts if we are inside
-                // of a param list.
-                //
-                // This affects both default type bindings, e.g. `struct<T, U = [u8; std::mem::size_of::<T>()]>(T, U)`,
-                // and the types of const parameters, e.g. `struct V<const N: usize, const M: [u8; N]>();`.
+                // of a const parameter type, e.g. `struct Foo<const N: usize, const M: [u8; N]>` is not allowed.
                 None
             } else if tcx.lazy_normalization() {
+                if let Some(param_id) = tcx.hir().opt_const_param_default_param_hir_id(hir_id) {
+                    // If the def_id we are calling generics_of on is an anon ct default i.e:
+                    //
+                    // struct Foo<const N: usize = { .. }>;
+                    //        ^^^       ^          ^^^^^^ def id of this anon const
+                    //        ^         ^ param_id
+                    //        ^ parent_def_id
+                    //
+                    // then we only want to return generics for params to the left of `N`. If we don't do that we
+                    // end up with that const looking like: `ty::ConstKind::Unevaluated(def_id, substs: [N#0])`.
+                    //
+                    // This causes ICEs (#86580) when building the substs for Foo in `fn foo() -> Foo { .. }` as
+                    // we substitute the defaults with the partially built substs when we build the substs. Subst'ing
+                    // the `N#0` on the unevaluated const indexes into the empty substs we're in the process of building.
+                    //
+                    // We fix this by having this function return the parent's generics ourselves and truncating the
+                    // generics to only include non-forward declared params (with the exception of the `Self` ty)
+                    //
+                    // For the above code example that means we want `substs: []`
+                    // For the following struct def we want `substs: [N#0]` when generics_of is called on
+                    // the def id of the `{ N + 1 }` anon const
+                    // struct Foo<const N: usize, const M: usize = { N + 1 }>;
+                    //
+                    // This has some implications for how we get the predicates available to the anon const
+                    // see `explicit_predicates_of` for more information on this
+                    let generics = tcx.generics_of(parent_def_id.to_def_id());
+                    let param_def = tcx.hir().local_def_id(param_id).to_def_id();
+                    let param_def_idx = generics.param_def_id_to_index[&param_def];
+                    // In the above example this would be .params[..N#0]
+                    let params = generics.params[..param_def_idx as usize].to_owned();
+                    let param_def_id_to_index =
+                        params.iter().map(|param| (param.def_id, param.index)).collect();
+
+                    return ty::Generics {
+                        // we set the parent of these generics to be our parent's parent so that we
+                        // dont end up with substs: [N, M, N] for the const default on a struct like this:
+                        // struct Foo<const N: usize, const M: usize = { ... }>;
+                        parent: generics.parent,
+                        parent_count: generics.parent_count,
+                        params,
+                        param_def_id_to_index,
+                        has_self: generics.has_self,
+                        has_late_bound_regions: generics.has_late_bound_regions,
+                    };
+                }
+
                 // HACK(eddyb) this provides the correct generics when
-                // `feature(const_generics)` is enabled, so that const expressions
+                // `feature(generic_const_expressions)` is enabled, so that const expressions
                 // used with const generics, e.g. `Foo<{N+1}>`, can work at all.
                 //
                 // Note that we do not supply the parent generics when using
@@ -1517,7 +1626,7 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::Generics {
                         |lint| {
                             lint.build(
                                 "defaults for type parameters are only allowed in \
-                                 `struct`, `enum`, `type`, or `trait` definitions.",
+                                 `struct`, `enum`, `type`, or `trait` definitions",
                             )
                             .emit();
                         },
@@ -1543,13 +1652,21 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::Generics {
             i += 1;
             Some(param_def)
         }
-        GenericParamKind::Const { .. } => {
+        GenericParamKind::Const { default, .. } => {
+            if !allow_defaults && default.is_some() {
+                tcx.sess.span_err(
+                    param.span,
+                    "defaults for const parameters are only allowed in \
+                    `struct`, `enum`, `type`, or `trait` definitions",
+                );
+            }
+
             let param_def = ty::GenericParamDef {
                 index: type_start + i as u32,
                 name: param.name.ident().name,
                 def_id: tcx.hir().local_def_id(param.hir_id).to_def_id(),
                 pure_wrt_drop: param.pure_wrt_drop,
-                kind: ty::GenericParamDefKind::Const,
+                kind: ty::GenericParamDefKind::Const { has_default: default.is_some() },
             };
             i += 1;
             Some(param_def)
@@ -1592,13 +1709,11 @@ fn generics_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::Generics {
 }
 
 fn are_suggestable_generic_args(generic_args: &[hir::GenericArg<'_>]) -> bool {
-    generic_args
-        .iter()
-        .filter_map(|arg| match arg {
-            hir::GenericArg::Type(ty) => Some(ty),
-            _ => None,
-        })
-        .any(is_suggestable_infer_ty)
+    generic_args.iter().any(|arg| match arg {
+        hir::GenericArg::Type(ty) => is_suggestable_infer_ty(ty),
+        hir::GenericArg::Infer(_) => true,
+        _ => false,
+    })
 }
 
 /// Whether `ty` is a type with `_` placeholders that can be inferred. Used in diagnostics only to
@@ -1657,11 +1772,12 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: DefId) -> ty::PolyFnSig<'_> {
                         ty::ReErased => tcx.lifetimes.re_static,
                         _ => r,
                     });
+                    let fn_sig = ty::Binder::dummy(fn_sig);
 
                     let mut visitor = PlaceholderHirTyCollector::default();
                     visitor.visit_ty(ty);
-                    let mut diag = bad_placeholder_type(tcx, visitor.0);
-                    let ret_ty = fn_sig.output();
+                    let mut diag = bad_placeholder_type(tcx, visitor.0, "return type");
+                    let ret_ty = fn_sig.skip_binder().output();
                     if ret_ty != tcx.ty_error() {
                         if !ret_ty.is_closure() {
                             let ret_ty_str = match ret_ty.kind() {
@@ -1687,10 +1803,11 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: DefId) -> ty::PolyFnSig<'_> {
                     }
                     diag.emit();
 
-                    ty::Binder::bind(fn_sig)
+                    fn_sig
                 }
-                None => AstConv::ty_of_fn(
+                None => <dyn AstConv<'_>>::ty_of_fn(
                     &icx,
+                    hir_id,
                     sig.header.unsafety,
                     sig.header.abi,
                     &sig.decl,
@@ -1706,8 +1823,9 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: DefId) -> ty::PolyFnSig<'_> {
             ident,
             generics,
             ..
-        }) => AstConv::ty_of_fn(
+        }) => <dyn AstConv<'_>>::ty_of_fn(
             &icx,
+            hir_id,
             header.unsafety,
             header.abi,
             decl,
@@ -1729,7 +1847,7 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: DefId) -> ty::PolyFnSig<'_> {
             let ty = tcx.type_of(tcx.hir().get_parent_did(hir_id).to_def_id());
             let inputs =
                 data.fields().iter().map(|f| tcx.type_of(tcx.hir().local_def_id(f.hir_id)));
-            ty::Binder::bind(tcx.mk_fn_sig(
+            ty::Binder::dummy(tcx.mk_fn_sig(
                 inputs,
                 ty,
                 false,
@@ -1767,7 +1885,7 @@ fn impl_trait_ref(tcx: TyCtxt<'_>, def_id: DefId) -> Option<ty::TraitRef<'_>> {
     match tcx.hir().expect_item(hir_id).kind {
         hir::ItemKind::Impl(ref impl_) => impl_.of_trait.as_ref().map(|ast_trait_ref| {
             let selfty = tcx.type_of(def_id);
-            AstConv::instantiate_mono_trait_ref(&icx, ast_trait_ref, selfty)
+            <dyn AstConv<'_>>::instantiate_mono_trait_ref(&icx, ast_trait_ref, selfty)
         }),
         _ => bug!(),
     }
@@ -1874,7 +1992,16 @@ fn predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericPredicates<'_> {
         // prove that the trait applies to the types that were
         // used, and adding the predicate into this list ensures
         // that this is done.
-        let span = tcx.sess.source_map().guess_head_span(tcx.def_span(def_id));
+        let mut span = tcx.def_span(def_id);
+        if tcx.sess.source_map().is_local_span(span) {
+            // `guess_head_span` reads the actual source file from
+            // disk to try to determine the 'head' snippet of the span.
+            // Don't do this for a span that comes from a file outside
+            // of our crate, since this would make our query output
+            // (and overall crate metadata) dependent on the
+            // *current* state of an external file.
+            span = tcx.sess.source_map().guess_head_span(span);
+        }
         result.predicates =
             tcx.arena.alloc_from_iter(result.predicates.iter().copied().chain(std::iter::once((
                 ty::TraitRef::identity(tcx, def_id).without_const().to_predicate(tcx),
@@ -1899,7 +2026,6 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
     let mut is_default_impl_trait = None;
 
     let icx = ItemCtxt::new(tcx, def_id);
-    let constness = icx.default_constness_for_trait_bounds();
 
     const NO_GENERICS: &hir::Generics<'_> = &hir::Generics::empty();
 
@@ -1916,7 +2042,9 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
             match item.kind {
                 ItemKind::Impl(ref impl_) => {
                     if impl_.defaultness.is_default() {
-                        is_default_impl_trait = tcx.impl_trait_ref(def_id);
+                        is_default_impl_trait = tcx
+                            .impl_trait_ref(def_id)
+                            .map(|trait_ref| ty::Binder::dummy(trait_ref));
                     }
                     &impl_.generics
                 }
@@ -1996,10 +2124,7 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
     // (see below). Recall that a default impl is not itself an impl, but rather a
     // set of defaults that can be incorporated into another impl.
     if let Some(trait_ref) = is_default_impl_trait {
-        predicates.insert((
-            trait_ref.to_poly_trait_ref().without_const().to_predicate(tcx),
-            tcx.def_span(def_id),
-        ));
+        predicates.insert((trait_ref.without_const().to_predicate(tcx), tcx.def_span(def_id)));
     }
 
     // Collect the region predicates that were declared inline as
@@ -2018,8 +2143,8 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
             GenericParamKind::Lifetime { .. } => {
                 param.bounds.iter().for_each(|bound| match bound {
                     hir::GenericBound::Outlives(lt) => {
-                        let bound = AstConv::ast_region_to_region(&icx, &lt, None);
-                        let outlives = ty::Binder::bind(ty::OutlivesPredicate(region, bound));
+                        let bound = <dyn AstConv<'_>>::ast_region_to_region(&icx, &lt, None);
+                        let outlives = ty::Binder::dummy(ty::OutlivesPredicate(region, bound));
                         predicates.insert((outlives.to_predicate(tcx), lt.span));
                     }
                     _ => bug!(),
@@ -2040,9 +2165,15 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
                 let param_ty = ty::ParamTy::new(index, name).to_ty(tcx);
                 index += 1;
 
-                let sized = SizedByDefault::Yes;
-                let bounds =
-                    AstConv::compute_bounds(&icx, param_ty, &param.bounds, sized, param.span);
+                let mut bounds = <dyn AstConv<'_>>::compute_bounds(&icx, param_ty, &param.bounds);
+                // Params are implicitly sized unless a `?Sized` bound is found
+                <dyn AstConv<'_>>::add_implicitly_sized(
+                    &icx,
+                    &mut bounds,
+                    &param.bounds,
+                    Some((param.hir_id, ast_generics.where_clause.predicates)),
+                    param.span,
+                );
                 predicates.extend(bounds.predicates(tcx, param_ty));
             }
             GenericParamKind::Const { .. } => {
@@ -2059,6 +2190,7 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
         match predicate {
             hir::WherePredicate::BoundPredicate(bound_pred) => {
                 let ty = icx.to_ty(&bound_pred.bounded_ty);
+                let bound_vars = icx.tcx.late_bound_vars(bound_pred.bounded_ty.hir_id);
 
                 // Keep the type around in a dummy predicate, in case of no bounds.
                 // That way, `where Ty:` is not a complete noop (see #53696) and `Ty`
@@ -2074,72 +2206,41 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
                     } else {
                         let span = bound_pred.bounded_ty.span;
                         let re_root_empty = tcx.lifetimes.re_root_empty;
-                        let predicate = ty::Binder::bind(ty::PredicateKind::TypeOutlives(
-                            ty::OutlivesPredicate(ty, re_root_empty),
-                        ));
+                        let predicate = ty::Binder::bind_with_vars(
+                            ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(
+                                ty,
+                                re_root_empty,
+                            )),
+                            bound_vars,
+                        );
                         predicates.insert((predicate.to_predicate(tcx), span));
                     }
                 }
 
-                for bound in bound_pred.bounds.iter() {
-                    match bound {
-                        hir::GenericBound::Trait(poly_trait_ref, modifier) => {
-                            let constness = match modifier {
-                                hir::TraitBoundModifier::MaybeConst => hir::Constness::NotConst,
-                                hir::TraitBoundModifier::None => constness,
-                                hir::TraitBoundModifier::Maybe => bug!("this wasn't handled"),
-                            };
-
-                            let mut bounds = Bounds::default();
-                            let _ = AstConv::instantiate_poly_trait_ref(
-                                &icx,
-                                &poly_trait_ref,
-                                constness,
-                                ty,
-                                &mut bounds,
-                            );
-                            predicates.extend(bounds.predicates(tcx, ty));
-                        }
-
-                        &hir::GenericBound::LangItemTrait(lang_item, span, hir_id, args) => {
-                            let mut bounds = Bounds::default();
-                            AstConv::instantiate_lang_item_trait_ref(
-                                &icx,
-                                lang_item,
-                                span,
-                                hir_id,
-                                args,
-                                ty,
-                                &mut bounds,
-                            );
-                            predicates.extend(bounds.predicates(tcx, ty));
-                        }
-
-                        hir::GenericBound::Outlives(lifetime) => {
-                            let region = AstConv::ast_region_to_region(&icx, lifetime, None);
-                            predicates.insert((
-                                ty::Binder::bind(ty::PredicateKind::TypeOutlives(
-                                    ty::OutlivesPredicate(ty, region),
-                                ))
-                                .to_predicate(tcx),
-                                lifetime.span,
-                            ));
-                        }
-                    }
-                }
+                let mut bounds = Bounds::default();
+                <dyn AstConv<'_>>::add_bounds(
+                    &icx,
+                    ty,
+                    bound_pred.bounds.iter(),
+                    &mut bounds,
+                    bound_vars,
+                );
+                predicates.extend(bounds.predicates(tcx, ty));
             }
 
             hir::WherePredicate::RegionPredicate(region_pred) => {
-                let r1 = AstConv::ast_region_to_region(&icx, &region_pred.lifetime, None);
+                let r1 = <dyn AstConv<'_>>::ast_region_to_region(&icx, &region_pred.lifetime, None);
                 predicates.extend(region_pred.bounds.iter().map(|bound| {
                     let (r2, span) = match bound {
                         hir::GenericBound::Outlives(lt) => {
-                            (AstConv::ast_region_to_region(&icx, lt, None), lt.span)
+                            (<dyn AstConv<'_>>::ast_region_to_region(&icx, lt, None), lt.span)
                         }
                         _ => bug!(),
                     };
-                    let pred = ty::PredicateKind::RegionOutlives(ty::OutlivesPredicate(r1, r2))
-                        .to_predicate(icx.tcx);
+                    let pred = ty::Binder::dummy(ty::PredicateKind::RegionOutlives(
+                        ty::OutlivesPredicate(r1, r2),
+                    ))
+                    .to_predicate(icx.tcx);
 
                     (pred, span)
                 }))
@@ -2151,7 +2252,7 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
         }
     }
 
-    if tcx.features().const_evaluatable_checked {
+    if tcx.features().generic_const_exprs {
         predicates.extend(const_evaluatable_predicates_of(tcx, def_id.expect_local()));
     }
 
@@ -2169,7 +2270,7 @@ fn gather_explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericP
             tcx,
             &mut predicates,
             trait_ref,
-            &mut cgp::parameters_for_impl(self_ty, trait_ref),
+            &mut cgp::parameters_for_impl(tcx, self_ty, trait_ref),
         );
     }
 
@@ -2200,13 +2301,25 @@ fn const_evaluatable_predicates_of<'tcx>(
         fn visit_anon_const(&mut self, c: &'tcx hir::AnonConst) {
             let def_id = self.tcx.hir().local_def_id(c.hir_id);
             let ct = ty::Const::from_anon_const(self.tcx, def_id);
-            if let ty::ConstKind::Unevaluated(def, substs, None) = ct.val {
+            if let ty::ConstKind::Unevaluated(uv) = ct.val {
+                assert_eq!(uv.promoted, None);
                 let span = self.tcx.hir().span(c.hir_id);
                 self.preds.insert((
-                    ty::PredicateKind::ConstEvaluatable(def, substs).to_predicate(self.tcx),
+                    ty::Binder::dummy(ty::PredicateKind::ConstEvaluatable(uv.shrink()))
+                        .to_predicate(self.tcx),
                     span,
                 ));
             }
+        }
+
+        fn visit_const_param_default(&mut self, _param: HirId, _ct: &'tcx hir::AnonConst) {
+            // Do not look into const param defaults,
+            // these get checked when they are actually instantiated.
+            //
+            // We do not want the following to error:
+            //
+            //     struct Foo<const N: usize, const M: usize = { N + 1 }>;
+            //     struct Bar<const N: usize>(Foo<N, 3>);
         }
     }
 
@@ -2249,7 +2362,8 @@ fn trait_explicit_predicates_and_bounds(
 }
 
 fn explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericPredicates<'_> {
-    if let DefKind::Trait = tcx.def_kind(def_id) {
+    let def_kind = tcx.def_kind(def_id);
+    if let DefKind::Trait = def_kind {
         // Remove bounds on associated types from the predicates, they will be
         // returned by `explicit_item_bounds`.
         let predicates_and_bounds = tcx.trait_explicit_predicates_and_bounds(def_id.expect_local());
@@ -2277,7 +2391,7 @@ fn explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericPredicat
             .iter()
             .copied()
             .filter(|(pred, _)| match pred.kind().skip_binder() {
-                ty::PredicateKind::Trait(tr, _) => !is_assoc_item_ty(tr.self_ty()),
+                ty::PredicateKind::Trait(tr) => !is_assoc_item_ty(tr.self_ty()),
                 ty::PredicateKind::Projection(proj) => {
                     !is_assoc_item_ty(proj.projection_ty.self_ty())
                 }
@@ -2294,31 +2408,28 @@ fn explicit_predicates_of(tcx: TyCtxt<'_>, def_id: DefId) -> ty::GenericPredicat
             }
         }
     } else {
-        gather_explicit_predicates_of(tcx, def_id)
-    }
-}
-
-fn projection_ty_from_predicates(
-    tcx: TyCtxt<'tcx>,
-    key: (
-        // ty_def_id
-        DefId,
-        // def_id of `N` in `<T as Trait>::N`
-        DefId,
-    ),
-) -> Option<ty::ProjectionTy<'tcx>> {
-    let (ty_def_id, item_def_id) = key;
-    let mut projection_ty = None;
-    for (predicate, _) in tcx.predicates_of(ty_def_id).predicates {
-        if let ty::PredicateKind::Projection(projection_predicate) = predicate.kind().skip_binder()
-        {
-            if item_def_id == projection_predicate.projection_ty.item_def_id {
-                projection_ty = Some(projection_predicate.projection_ty);
-                break;
+        if matches!(def_kind, DefKind::AnonConst) && tcx.lazy_normalization() {
+            let hir_id = tcx.hir().local_def_id_to_hir_id(def_id.expect_local());
+            if let Some(_) = tcx.hir().opt_const_param_default_param_hir_id(hir_id) {
+                // In `generics_of` we set the generics' parent to be our parent's parent which means that
+                // we lose out on the predicates of our actual parent if we dont return those predicates here.
+                // (See comment in `generics_of` for more information on why the parent shenanigans is necessary)
+                //
+                // struct Foo<T, const N: usize = { <T as Trait>::ASSOC }>(T) where T: Trait;
+                //        ^^^                     ^^^^^^^^^^^^^^^^^^^^^^^ the def id we are calling
+                //        ^^^                                             explicit_predicates_of on
+                //        parent item we dont have set as the
+                //        parent of generics returned by `generics_of`
+                //
+                // In the above code we want the anon const to have predicates in its param env for `T: Trait`
+                let item_id = tcx.hir().get_parent_item(hir_id);
+                let item_def_id = tcx.hir().local_def_id(item_id).to_def_id();
+                // In the above code example we would be calling `explicit_predicates_of(Foo)` here
+                return tcx.explicit_predicates_of(item_def_id);
             }
         }
+        gather_explicit_predicates_of(tcx, def_id)
     }
-    projection_ty
 }
 
 /// Converts a specific `GenericBound` from the AST into a set of
@@ -2330,39 +2441,15 @@ fn predicates_from_bound<'tcx>(
     astconv: &dyn AstConv<'tcx>,
     param_ty: Ty<'tcx>,
     bound: &'tcx hir::GenericBound<'tcx>,
-    constness: hir::Constness,
 ) -> Vec<(ty::Predicate<'tcx>, Span)> {
-    match *bound {
-        hir::GenericBound::Trait(ref tr, modifier) => {
-            let constness = match modifier {
-                hir::TraitBoundModifier::Maybe => return vec![],
-                hir::TraitBoundModifier::MaybeConst => hir::Constness::NotConst,
-                hir::TraitBoundModifier::None => constness,
-            };
-
-            let mut bounds = Bounds::default();
-            let _ = astconv.instantiate_poly_trait_ref(tr, constness, param_ty, &mut bounds);
-            bounds.predicates(astconv.tcx(), param_ty)
-        }
-        hir::GenericBound::LangItemTrait(lang_item, span, hir_id, args) => {
-            let mut bounds = Bounds::default();
-            astconv.instantiate_lang_item_trait_ref(
-                lang_item,
-                span,
-                hir_id,
-                args,
-                param_ty,
-                &mut bounds,
-            );
-            bounds.predicates(astconv.tcx(), param_ty)
-        }
-        hir::GenericBound::Outlives(ref lifetime) => {
-            let region = astconv.ast_region_to_region(lifetime, None);
-            let pred = ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(param_ty, region))
-                .to_predicate(astconv.tcx());
-            vec![(pred, lifetime.span)]
-        }
-    }
+    let mut bounds = Bounds::default();
+    astconv.add_bounds(
+        param_ty,
+        std::array::IntoIter::new([bound]),
+        &mut bounds,
+        ty::List::empty(),
+    );
+    bounds.predicates(astconv.tcx(), param_ty)
 }
 
 fn compute_sig_of_foreign_fn_decl<'tcx>(
@@ -2377,8 +2464,10 @@ fn compute_sig_of_foreign_fn_decl<'tcx>(
     } else {
         hir::Unsafety::Unsafe
     };
-    let fty = AstConv::ty_of_fn(
+    let hir_id = tcx.hir().local_def_id_to_hir_id(def_id.expect_local());
+    let fty = <dyn AstConv<'_>>::ty_of_fn(
         &ItemCtxt::new(tcx, def_id),
+        hir_id,
         unsafety,
         abi,
         decl,
@@ -2413,7 +2502,7 @@ fn compute_sig_of_foreign_fn_decl<'tcx>(
                     .emit();
             }
         };
-        for (input, ty) in decl.inputs.iter().zip(fty.inputs().skip_binder()) {
+        for (input, ty) in iter::zip(decl.inputs, fty.inputs().skip_binder()) {
             check(&input, ty)
         }
         if let hir::FnRetTy::Return(ref ty) = decl.output {
@@ -2534,6 +2623,7 @@ fn from_target_feature(
                 Some(sym::rtm_target_feature) => rust_features.rtm_target_feature,
                 Some(sym::f16c_target_feature) => rust_features.f16c_target_feature,
                 Some(sym::ermsb_target_feature) => rust_features.ermsb_target_feature,
+                Some(sym::bpf_target_feature) => rust_features.bpf_target_feature,
                 Some(name) => bug!("unknown target feature gate {}", name),
                 None => true,
             };
@@ -2589,8 +2679,15 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
     let attrs = tcx.get_attrs(id);
 
     let mut codegen_fn_attrs = CodegenFnAttrs::new();
-    if should_inherit_track_caller(tcx, id) {
+    if tcx.should_inherit_track_caller(id) {
         codegen_fn_attrs.flags |= CodegenFnAttrFlags::TRACK_CALLER;
+    }
+
+    // With -Z panic-in-drop=abort, drop_in_place never unwinds.
+    if tcx.sess.opts.debugging_opts.panic_in_drop == PanicStrategy::Abort {
+        if Some(id) == tcx.lang_items().drop_in_place_fn() {
+            codegen_fn_attrs.flags |= CodegenFnAttrFlags::NEVER_UNWIND;
+        }
     }
 
     let supported_target_features = tcx.supported_target_features(LOCAL_CRATE);
@@ -2599,13 +2696,11 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
     let mut link_ordinal_span = None;
     let mut no_sanitize_span = None;
     for attr in attrs.iter() {
-        if tcx.sess.check_name(attr, sym::cold) {
+        if attr.has_name(sym::cold) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::COLD;
-        } else if tcx.sess.check_name(attr, sym::rustc_allocator) {
+        } else if attr.has_name(sym::rustc_allocator) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::ALLOCATOR;
-        } else if tcx.sess.check_name(attr, sym::unwind) {
-            codegen_fn_attrs.flags |= CodegenFnAttrFlags::UNWIND;
-        } else if tcx.sess.check_name(attr, sym::ffi_returns_twice) {
+        } else if attr.has_name(sym::ffi_returns_twice) {
             if tcx.is_foreign_item(id) {
                 codegen_fn_attrs.flags |= CodegenFnAttrFlags::FFI_RETURNS_TWICE;
             } else {
@@ -2618,9 +2713,9 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                 )
                 .emit();
             }
-        } else if tcx.sess.check_name(attr, sym::ffi_pure) {
+        } else if attr.has_name(sym::ffi_pure) {
             if tcx.is_foreign_item(id) {
-                if attrs.iter().any(|a| tcx.sess.check_name(a, sym::ffi_const)) {
+                if attrs.iter().any(|a| a.has_name(sym::ffi_const)) {
                     // `#[ffi_const]` functions cannot be `#[ffi_pure]`
                     struct_span_err!(
                         tcx.sess,
@@ -2642,7 +2737,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                 )
                 .emit();
             }
-        } else if tcx.sess.check_name(attr, sym::ffi_const) {
+        } else if attr.has_name(sym::ffi_const) {
             if tcx.is_foreign_item(id) {
                 codegen_fn_attrs.flags |= CodegenFnAttrFlags::FFI_CONST;
             } else {
@@ -2655,17 +2750,19 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                 )
                 .emit();
             }
-        } else if tcx.sess.check_name(attr, sym::rustc_allocator_nounwind) {
-            codegen_fn_attrs.flags |= CodegenFnAttrFlags::RUSTC_ALLOCATOR_NOUNWIND;
-        } else if tcx.sess.check_name(attr, sym::naked) {
+        } else if attr.has_name(sym::rustc_allocator_nounwind) {
+            codegen_fn_attrs.flags |= CodegenFnAttrFlags::NEVER_UNWIND;
+        } else if attr.has_name(sym::naked) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::NAKED;
-        } else if tcx.sess.check_name(attr, sym::no_mangle) {
+        } else if attr.has_name(sym::no_mangle) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
-        } else if tcx.sess.check_name(attr, sym::rustc_std_internal_symbol) {
+        } else if attr.has_name(sym::no_coverage) {
+            codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_COVERAGE;
+        } else if attr.has_name(sym::rustc_std_internal_symbol) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL;
-        } else if tcx.sess.check_name(attr, sym::used) {
+        } else if attr.has_name(sym::used) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED;
-        } else if tcx.sess.check_name(attr, sym::cmse_nonsecure_entry) {
+        } else if attr.has_name(sym::cmse_nonsecure_entry) {
             if !matches!(tcx.fn_sig(id).abi(), abi::Abi::C { .. }) {
                 struct_span_err!(
                     tcx.sess,
@@ -2680,15 +2777,24 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                     .emit();
             }
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::CMSE_NONSECURE_ENTRY;
-        } else if tcx.sess.check_name(attr, sym::thread_local) {
+        } else if attr.has_name(sym::thread_local) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::THREAD_LOCAL;
-        } else if tcx.sess.check_name(attr, sym::track_caller) {
-            if tcx.is_closure(id) || tcx.fn_sig(id).abi() != abi::Abi::Rust {
+        } else if attr.has_name(sym::track_caller) {
+            if !tcx.is_closure(id) && tcx.fn_sig(id).abi() != abi::Abi::Rust {
                 struct_span_err!(tcx.sess, attr.span, E0737, "`#[track_caller]` requires Rust ABI")
                     .emit();
             }
+            if tcx.is_closure(id) && !tcx.features().closure_track_caller {
+                feature_err(
+                    &tcx.sess.parse_sess,
+                    sym::closure_track_caller,
+                    attr.span,
+                    "`#[track_caller]` on closures is currently unstable",
+                )
+                .emit();
+            }
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::TRACK_CALLER;
-        } else if tcx.sess.check_name(attr, sym::export_name) {
+        } else if attr.has_name(sym::export_name) {
             if let Some(s) = attr.value_str() {
                 if s.as_str().contains('\0') {
                     // `#[export_name = ...]` will be converted to a null-terminated string,
@@ -2703,9 +2809,27 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                 }
                 codegen_fn_attrs.export_name = Some(s);
             }
-        } else if tcx.sess.check_name(attr, sym::target_feature) {
+        } else if attr.has_name(sym::target_feature) {
             if !tcx.is_closure(id) && tcx.fn_sig(id).unsafety() == hir::Unsafety::Normal {
-                if !tcx.features().target_feature_11 {
+                if tcx.sess.target.is_like_wasm || tcx.sess.opts.actually_rustdoc {
+                    // The `#[target_feature]` attribute is allowed on
+                    // WebAssembly targets on all functions, including safe
+                    // ones. Other targets require that `#[target_feature]` is
+                    // only applied to unsafe funtions (pending the
+                    // `target_feature_11` feature) because on most targets
+                    // execution of instructions that are not supported is
+                    // considered undefined behavior. For WebAssembly which is a
+                    // 100% safe target at execution time it's not possible to
+                    // execute undefined instructions, and even if a future
+                    // feature was added in some form for this it would be a
+                    // deterministic trap. There is no undefined behavior when
+                    // executing WebAssembly so `#[target_feature]` is allowed
+                    // on safe functions (but again, only for WebAssembly)
+                    //
+                    // Note that this is also allowed if `actually_rustdoc` so
+                    // if a target is documenting some wasm-specific code then
+                    // it's not spuriously denied.
+                } else if !tcx.features().target_feature_11 {
                     let mut err = feature_err(
                         &tcx.sess.parse_sess,
                         sym::target_feature_11,
@@ -2725,11 +2849,11 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                 &supported_target_features,
                 &mut codegen_fn_attrs.target_features,
             );
-        } else if tcx.sess.check_name(attr, sym::linkage) {
+        } else if attr.has_name(sym::linkage) {
             if let Some(val) = attr.value_str() {
                 codegen_fn_attrs.linkage = Some(linkage_by_name(tcx, id, &val.as_str()));
             }
-        } else if tcx.sess.check_name(attr, sym::link_section) {
+        } else if attr.has_name(sym::link_section) {
             if let Some(val) = attr.value_str() {
                 if val.as_str().bytes().any(|b| b == 0) {
                     let msg = format!(
@@ -2742,14 +2866,14 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                     codegen_fn_attrs.link_section = Some(val);
                 }
             }
-        } else if tcx.sess.check_name(attr, sym::link_name) {
+        } else if attr.has_name(sym::link_name) {
             codegen_fn_attrs.link_name = attr.value_str();
-        } else if tcx.sess.check_name(attr, sym::link_ordinal) {
+        } else if attr.has_name(sym::link_ordinal) {
             link_ordinal_span = Some(attr.span);
             if let ordinal @ Some(_) = check_link_ordinal(tcx, attr) {
                 codegen_fn_attrs.link_ordinal = ordinal;
             }
-        } else if tcx.sess.check_name(attr, sym::no_sanitize) {
+        } else if attr.has_name(sym::no_sanitize) {
             no_sanitize_span = Some(attr.span);
             if let Some(list) = attr.meta_item_list() {
                 for item in list.iter() {
@@ -2769,7 +2893,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                     }
                 }
             }
-        } else if tcx.sess.check_name(attr, sym::instruction_set) {
+        } else if attr.has_name(sym::instruction_set) {
             codegen_fn_attrs.instruction_set = match attr.meta().map(|i| i.kind) {
                 Some(MetaItemKind::List(ref items)) => match items.as_slice() {
                     [NestedMetaItem::MetaItem(set)] => {
@@ -2838,6 +2962,36 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                     None
                 }
             };
+        } else if attr.has_name(sym::repr) {
+            codegen_fn_attrs.alignment = match attr.meta_item_list() {
+                Some(items) => match items.as_slice() {
+                    [item] => match item.name_value_literal() {
+                        Some((sym::align, literal)) => {
+                            let alignment = rustc_attr::parse_alignment(&literal.kind);
+
+                            match alignment {
+                                Ok(align) => Some(align),
+                                Err(msg) => {
+                                    struct_span_err!(
+                                        tcx.sess.diagnostic(),
+                                        attr.span,
+                                        E0589,
+                                        "invalid `repr(align)` attribute: {}",
+                                        msg
+                                    )
+                                    .emit();
+
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    },
+                    [] => None,
+                    _ => None,
+                },
+                None => None,
+            };
         }
     }
 
@@ -2846,12 +3000,8 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
             return ia;
         }
         match attr.meta().map(|i| i.kind) {
-            Some(MetaItemKind::Word) => {
-                tcx.sess.mark_attr_used(attr);
-                InlineAttr::Hint
-            }
+            Some(MetaItemKind::Word) => InlineAttr::Hint,
             Some(MetaItemKind::List(ref items)) => {
-                tcx.sess.mark_attr_used(attr);
                 inline_span = Some(attr.span);
                 if items.len() != 1 {
                     struct_span_err!(
@@ -2894,7 +3044,6 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
                 ia
             }
             Some(MetaItemKind::List(ref items)) => {
-                tcx.sess.mark_attr_used(attr);
                 inline_span = Some(attr.span);
                 if items.len() != 1 {
                     err(attr.span, "expected one argument");
@@ -2963,7 +3112,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
     if tcx.is_weak_lang_item(id) {
         codegen_fn_attrs.flags |= CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL;
     }
-    let check_name = |attr, sym| tcx.sess.check_name(attr, sym);
+    let check_name = |attr: &Attribute, sym| attr.has_name(sym);
     if let Some(name) = weak_lang_items::link_name(check_name, &attrs) {
         codegen_fn_attrs.export_name = Some(name);
         codegen_fn_attrs.link_name = Some(name);
@@ -2975,6 +3124,15 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
     // also applies to weak symbols where they all have known symbol names.
     if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL) {
         codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
+    }
+
+    // Any linkage to LLVM intrinsics for now forcibly marks them all as never
+    // unwinds since LLVM sometimes can't handle codegen which `invoke`s
+    // intrinsic functions.
+    if let Some(name) = &codegen_fn_attrs.link_name {
+        if name.as_str().starts_with("llvm.") {
+            codegen_fn_attrs.flags |= CodegenFnAttrFlags::NEVER_UNWIND;
+        }
     }
 
     codegen_fn_attrs

@@ -1,7 +1,7 @@
 //! Code related to processing overloaded binary and unary operators.
 
 use super::method::MethodCallee;
-use super::FnCtxt;
+use super::{has_expected_num_generic_args, FnCtxt};
 use rustc_ast as ast;
 use rustc_errors::{self, struct_span_err, Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
@@ -428,7 +428,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 }
                 if let Some(missing_trait) = missing_trait {
-                    let mut visitor = TypeParamVisitor(vec![]);
+                    let mut visitor = TypeParamVisitor(self.tcx, vec![]);
                     visitor.visit_ty(lhs_ty);
 
                     if op.node == hir::BinOpKind::Add
@@ -439,7 +439,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         // This has nothing here because it means we did string
                         // concatenation (e.g., "Hello " + "World!"). This means
                         // we don't want the note in the else clause to be emitted
-                    } else if let [ty] = &visitor.0[..] {
+                    } else if let [ty] = &visitor.1[..] {
                         if let ty::Param(p) = *ty.kind() {
                             // Check if the method would be found if the type param wasn't
                             // involved. If so, it means that adding a trait bound to the param is
@@ -680,42 +680,53 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         ex.span,
                         format!("cannot apply unary operator `{}`", op.as_str()),
                     );
-                    match actual.kind() {
-                        Uint(_) if op == hir::UnOp::Neg => {
-                            err.note("unsigned values cannot be negated");
 
-                            if let hir::ExprKind::Unary(
-                                _,
-                                hir::Expr {
-                                    kind:
-                                        hir::ExprKind::Lit(Spanned {
-                                            node: ast::LitKind::Int(1, _),
-                                            ..
-                                        }),
-                                    ..
-                                },
-                            ) = ex.kind
-                            {
-                                err.span_suggestion(
-                                    ex.span,
-                                    &format!(
-                                        "you may have meant the maximum value of `{}`",
-                                        actual
-                                    ),
-                                    format!("{}::MAX", actual),
-                                    Applicability::MaybeIncorrect,
-                                );
+                    let sp = self.tcx.sess.source_map().start_point(ex.span);
+                    if let Some(sp) =
+                        self.tcx.sess.parse_sess.ambiguous_block_expr_parse.borrow().get(&sp)
+                    {
+                        // If the previous expression was a block expression, suggest parentheses
+                        // (turning this into a binary subtraction operation instead.)
+                        // for example, `{2} - 2` -> `({2}) - 2` (see src\test\ui\parser\expr-as-stmt.rs)
+                        self.tcx.sess.parse_sess.expr_parentheses_needed(&mut err, *sp);
+                    } else {
+                        match actual.kind() {
+                            Uint(_) if op == hir::UnOp::Neg => {
+                                err.note("unsigned values cannot be negated");
+
+                                if let hir::ExprKind::Unary(
+                                    _,
+                                    hir::Expr {
+                                        kind:
+                                            hir::ExprKind::Lit(Spanned {
+                                                node: ast::LitKind::Int(1, _),
+                                                ..
+                                            }),
+                                        ..
+                                    },
+                                ) = ex.kind
+                                {
+                                    err.span_suggestion(
+                                        ex.span,
+                                        &format!(
+                                            "you may have meant the maximum value of `{}`",
+                                            actual
+                                        ),
+                                        format!("{}::MAX", actual),
+                                        Applicability::MaybeIncorrect,
+                                    );
+                                }
                             }
-                        }
-                        Str | Never | Char | Tuple(_) | Array(_, _) => {}
-                        Ref(_, ref lty, _) if *lty.kind() == Str => {}
-                        _ => {
-                            let missing_trait = match op {
-                                hir::UnOp::Neg => "std::ops::Neg",
-                                hir::UnOp::Not => "std::ops::Not",
-                                hir::UnOp::Deref => "std::ops::UnDerf",
-                            };
-                            suggest_impl_missing(&mut err, operand_ty, &missing_trait);
+                            Str | Never | Char | Tuple(_) | Array(_, _) => {}
+                            Ref(_, ref lty, _) if *lty.kind() == Str => {}
+                            _ => {
+                                let missing_trait = match op {
+                                    hir::UnOp::Neg => "std::ops::Neg",
+                                    hir::UnOp::Not => "std::ops::Not",
+                                    hir::UnOp::Deref => "std::ops::UnDerf",
+                                };
+                                suggest_impl_missing(&mut err, operand_ty, &missing_trait);
+                            }
                         }
                     }
                     err.emit();
@@ -794,6 +805,23 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             "lookup_op_method(lhs_ty={:?}, op={:?}, opname={:?}, trait_did={:?})",
             lhs_ty, op, opname, trait_did
         );
+
+        // Catches cases like #83893, where a lang item is declared with the
+        // wrong number of generic arguments. Should have yielded an error
+        // elsewhere by now, but we have to catch it here so that we do not
+        // index `other_tys` out of bounds (if the lang item has too many
+        // generic arguments, `other_tys` is too short).
+        if !has_expected_num_generic_args(
+            self.tcx,
+            trait_did,
+            match op {
+                // Binary ops have a generic right-hand side, unary ops don't
+                Op::Binary(..) => 1,
+                Op::Unary(..) => 0,
+            },
+        ) {
+            return Err(());
+        }
 
         let method = trait_did.and_then(|trait_did| {
             let opname = Ident::with_dummy_span(opname);
@@ -986,12 +1014,15 @@ fn suggest_constraining_param(
     }
 }
 
-struct TypeParamVisitor<'tcx>(Vec<Ty<'tcx>>);
+struct TypeParamVisitor<'tcx>(TyCtxt<'tcx>, Vec<Ty<'tcx>>);
 
 impl<'tcx> TypeVisitor<'tcx> for TypeParamVisitor<'tcx> {
+    fn tcx_for_anon_const_substs(&self) -> Option<TyCtxt<'tcx>> {
+        Some(self.0)
+    }
     fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
         if let ty::Param(_) = ty.kind() {
-            self.0.push(ty);
+            self.1.push(ty);
         }
         ty.super_visit_with(self)
     }

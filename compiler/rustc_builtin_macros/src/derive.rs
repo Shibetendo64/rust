@@ -1,12 +1,13 @@
 use crate::cfg_eval::cfg_eval;
 
-use rustc_ast::{self as ast, token, ItemKind, MetaItemKind, NestedMetaItem, StmtKind};
+use rustc_ast as ast;
+use rustc_ast::{attr, token, GenericParamKind, ItemKind, MetaItemKind, NestedMetaItem, StmtKind};
 use rustc_errors::{struct_span_err, Applicability};
 use rustc_expand::base::{Annotatable, ExpandResult, ExtCtxt, Indeterminate, MultiItemModifier};
 use rustc_feature::AttributeTemplate;
 use rustc_parse::validate_attr;
 use rustc_session::Session;
-use rustc_span::symbol::sym;
+use rustc_span::symbol::{sym, Ident};
 use rustc_span::Span;
 
 crate struct Expander;
@@ -26,36 +27,70 @@ impl MultiItemModifier for Expander {
             return ExpandResult::Ready(vec![item]);
         }
 
-        let template =
-            AttributeTemplate { list: Some("Trait1, Trait2, ..."), ..Default::default() };
-        let attr = ecx.attribute(meta_item.clone());
-        validate_attr::check_builtin_attribute(&sess.parse_sess, &attr, sym::derive, template);
+        let (sess, features) = (ecx.sess, ecx.ecfg.features);
+        let result =
+            ecx.resolver.resolve_derives(ecx.current_expansion.id, ecx.force_mode, &|| {
+                let template =
+                    AttributeTemplate { list: Some("Trait1, Trait2, ..."), ..Default::default() };
+                let attr = attr::mk_attr_outer(meta_item.clone());
+                validate_attr::check_builtin_attribute(
+                    &sess.parse_sess,
+                    &attr,
+                    sym::derive,
+                    template,
+                );
 
-        let derives: Vec<_> = attr
-            .meta_item_list()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|nested_meta| match nested_meta {
-                NestedMetaItem::MetaItem(meta) => Some(meta),
-                NestedMetaItem::Literal(lit) => {
-                    // Reject `#[derive("Debug")]`.
-                    report_unexpected_literal(sess, &lit);
-                    None
+                let mut resolutions: Vec<_> = attr
+                    .meta_item_list()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|nested_meta| match nested_meta {
+                        NestedMetaItem::MetaItem(meta) => Some(meta),
+                        NestedMetaItem::Literal(lit) => {
+                            // Reject `#[derive("Debug")]`.
+                            report_unexpected_literal(sess, &lit);
+                            None
+                        }
+                    })
+                    .map(|meta| {
+                        // Reject `#[derive(Debug = "value", Debug(abc))]`, but recover the paths.
+                        report_path_args(sess, &meta);
+                        meta.path
+                    })
+                    .map(|path| (path, dummy_annotatable(), None))
+                    .collect();
+
+                // Do not configure or clone items unless necessary.
+                match &mut resolutions[..] {
+                    [] => {}
+                    [(_, first_item, _), others @ ..] => {
+                        *first_item = cfg_eval(sess, features, item.clone());
+                        for (_, item, _) in others {
+                            *item = first_item.clone();
+                        }
+                    }
                 }
-            })
-            .map(|meta| {
-                // Reject `#[derive(Debug = "value", Debug(abc))]`, but recover the paths.
-                report_path_args(sess, &meta);
-                meta.path
-            })
-            .collect();
 
-        // FIXME: Try to cache intermediate results to avoid collecting same paths multiple times.
-        match ecx.resolver.resolve_derives(ecx.current_expansion.id, derives, ecx.force_mode) {
-            Ok(()) => ExpandResult::Ready(cfg_eval(ecx, item)),
+                resolutions
+            });
+
+        match result {
+            Ok(()) => ExpandResult::Ready(vec![item]),
             Err(Indeterminate) => ExpandResult::Retry(item),
         }
     }
+}
+
+// The cheapest `Annotatable` to construct.
+fn dummy_annotatable() -> Annotatable {
+    Annotatable::GenericParam(ast::GenericParam {
+        id: ast::DUMMY_NODE_ID,
+        ident: Ident::invalid(),
+        attrs: Default::default(),
+        bounds: Default::default(),
+        is_placeholder: false,
+        kind: GenericParamKind::Lifetime,
+    })
 }
 
 fn report_bad_target(sess: &Session, item: &Annotatable, span: Span) -> bool {
@@ -75,8 +110,10 @@ fn report_bad_target(sess: &Session, item: &Annotatable, span: Span) -> bool {
             sess,
             span,
             E0774,
-            "`derive` may only be applied to structs, enums and unions",
+            "`derive` may only be applied to `struct`s, `enum`s and `union`s",
         )
+        .span_label(span, "not applicable here")
+        .span_label(item.span(), "not a `struct`, `enum` or `union`")
         .emit();
     }
     bad_target
@@ -90,6 +127,7 @@ fn report_unexpected_literal(sess: &Session, lit: &ast::Lit) {
         _ => "for example, write `#[derive(Debug)]` for `Debug`".to_string(),
     };
     struct_span_err!(sess, lit.span, E0777, "expected path to a trait, found literal",)
+        .span_label(lit.span, "not a trait")
         .help(&help_msg)
         .emit();
 }

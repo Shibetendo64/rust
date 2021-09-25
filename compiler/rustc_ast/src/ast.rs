@@ -100,6 +100,7 @@ pub struct Path {
 }
 
 impl PartialEq<Symbol> for Path {
+    #[inline]
     fn eq(&self, symbol: &Symbol) -> bool {
         self.segments.len() == 1 && { self.segments[0].ident.name == *symbol }
     }
@@ -149,8 +150,16 @@ impl PathSegment {
     pub fn from_ident(ident: Ident) -> Self {
         PathSegment { ident, id: DUMMY_NODE_ID, args: None }
     }
+
     pub fn path_root(span: Span) -> Self {
         PathSegment::from_ident(Ident::new(kw::PathRoot, span))
+    }
+
+    pub fn span(&self) -> Span {
+        match &self.args {
+            Some(args) => self.ident.span.to(args.span()),
+            None => self.ident.span,
+        }
     }
 }
 
@@ -269,13 +278,13 @@ impl ParenthesizedArgs {
             .cloned()
             .map(|input| AngleBracketedArg::Arg(GenericArg::Type(input)))
             .collect();
-        AngleBracketedArgs { span: self.span, args }
+        AngleBracketedArgs { span: self.inputs_span, args }
     }
 }
 
 pub use crate::node_id::{NodeId, CRATE_NODE_ID, DUMMY_NODE_ID};
 
-/// A modifier on a bound, e.g., `?Sized` or `?const Trait`.
+/// A modifier on a bound, e.g., `?Sized` or `~const Trait`.
 ///
 /// Negative bounds should also be handled here.
 #[derive(Copy, Clone, PartialEq, Eq, Encodable, Decodable, Debug)]
@@ -286,10 +295,10 @@ pub enum TraitBoundModifier {
     /// `?Trait`
     Maybe,
 
-    /// `?const Trait`
+    /// `~const Trait`
     MaybeConst,
 
-    /// `?const ?Trait`
+    /// `~const ?Trait`
     //
     // This parses but will be rejected during AST validation.
     MaybeConstMaybe,
@@ -323,10 +332,13 @@ pub type GenericBounds = Vec<GenericBound>;
 pub enum ParamKindOrd {
     Lifetime,
     Type,
-    // `unordered` is only `true` if `sess.has_features().const_generics`
-    // is active. Specifically, if it's only `min_const_generics`, it will still require
+    // `unordered` is only `true` if `sess.unordered_const_ty_params()`
+    // returns true. Specifically, if it's only `min_const_generics`, it will still require
     // ordering consts after types.
     Const { unordered: bool },
+    // `Infer` is not actually constructed directly from the AST, but is implicitly constructed
+    // during HIR lowering, and `ParamKindOrd` will implicitly order inferred variables last.
+    Infer,
 }
 
 impl Ord for ParamKindOrd {
@@ -334,7 +346,7 @@ impl Ord for ParamKindOrd {
         use ParamKindOrd::*;
         let to_int = |v| match v {
             Lifetime => 0,
-            Type | Const { unordered: true } => 1,
+            Infer | Type | Const { unordered: true } => 1,
             // technically both consts should be ordered equally,
             // but only one is ever encountered at a time, so this is
             // fine.
@@ -362,6 +374,7 @@ impl fmt::Display for ParamKindOrd {
             ParamKindOrd::Lifetime => "lifetime".fmt(f),
             ParamKindOrd::Type => "type".fmt(f),
             ParamKindOrd::Const { .. } => "const".fmt(f),
+            ParamKindOrd::Infer => "infer".fmt(f),
         }
     }
 }
@@ -489,13 +502,6 @@ pub struct Crate {
     pub attrs: Vec<Attribute>,
     pub items: Vec<P<Item>>,
     pub span: Span,
-    /// The order of items in the HIR is unrelated to the order of
-    /// items in the AST. However, we generate proc macro harnesses
-    /// based on the AST order, and later refer to these harnesses
-    /// from the HIR. This field keeps track of the order in which
-    /// we generated proc macros harnesses, so that we can map
-    /// HIR proc macros items back to their harness items.
-    pub proc_macros: Vec<NodeId>,
 }
 
 /// Possible values inside of compile-time attribute lists.
@@ -552,6 +558,14 @@ pub struct Block {
     pub rules: BlockCheckMode,
     pub span: Span,
     pub tokens: Option<LazyTokenStream>,
+    /// The following *isn't* a parse error, but will cause multiple errors in following stages.
+    /// ```
+    /// let x = {
+    ///     foo: var
+    /// };
+    /// ```
+    /// #34255
+    pub could_be_bare_literal: bool,
 }
 
 /// A match pattern.
@@ -614,12 +628,13 @@ impl Pat {
             PatKind::Ident(_, _, Some(p)) => p.walk(it),
 
             // Walk into each field of struct.
-            PatKind::Struct(_, fields, _) => fields.iter().for_each(|field| field.pat.walk(it)),
+            PatKind::Struct(_, _, fields, _) => fields.iter().for_each(|field| field.pat.walk(it)),
 
             // Sequence of patterns.
-            PatKind::TupleStruct(_, s) | PatKind::Tuple(s) | PatKind::Slice(s) | PatKind::Or(s) => {
-                s.iter().for_each(|p| p.walk(it))
-            }
+            PatKind::TupleStruct(_, _, s)
+            | PatKind::Tuple(s)
+            | PatKind::Slice(s)
+            | PatKind::Or(s) => s.iter().for_each(|p| p.walk(it)),
 
             // Trivial wrappers over inner patterns.
             PatKind::Box(s) | PatKind::Ref(s, _) | PatKind::Paren(s) => s.walk(it),
@@ -647,7 +662,7 @@ impl Pat {
 /// are treated the same as `x: x, y: ref y, z: ref mut z`,
 /// except when `is_shorthand` is true.
 #[derive(Clone, Encodable, Decodable, Debug)]
-pub struct FieldPat {
+pub struct PatField {
     /// The identifier for the field.
     pub ident: Ident,
     /// The pattern the field is destructured to.
@@ -667,7 +682,9 @@ pub enum BindingMode {
 
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum RangeEnd {
+    /// `..=` or `...`
     Included(RangeSyntax),
+    /// `..`
     Excluded,
 }
 
@@ -679,6 +696,7 @@ pub enum RangeSyntax {
     DotDotEq,
 }
 
+/// All the different flavors of pattern that Rust recognizes.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub enum PatKind {
     /// Represents a wildcard pattern (`_`).
@@ -692,10 +710,10 @@ pub enum PatKind {
 
     /// A struct or struct variant pattern (e.g., `Variant {x, y, ..}`).
     /// The `bool` is `true` in the presence of a `..`.
-    Struct(Path, Vec<FieldPat>, /* recovered */ bool),
+    Struct(Option<QSelf>, Path, Vec<PatField>, /* recovered */ bool),
 
     /// A tuple struct/variant pattern (`Variant(x, y, .., z)`).
-    TupleStruct(Path, Vec<P<Pat>>),
+    TupleStruct(Option<QSelf>, Path, Vec<P<Pat>>),
 
     /// An or-pattern `A | B | C`.
     /// Invariant: `pats.len() >= 2`.
@@ -719,7 +737,7 @@ pub enum PatKind {
     /// A literal.
     Lit(P<Expr>),
 
-    /// A range pattern (e.g., `1...2`, `1..=2` or `1..2`).
+    /// A range pattern (e.g., `1...2`, `1..2`, `1..`, `..2`, `1..=2`, `..=2`).
     Range(Option<P<Expr>>, Option<P<Expr>>, Spanned<RangeEnd>),
 
     /// A slice pattern `[a, b, c]`.
@@ -754,14 +772,6 @@ pub enum Mutability {
 }
 
 impl Mutability {
-    /// Returns `MutMutable` only if both `self` and `other` are mutable.
-    pub fn and(self, other: Self) -> Self {
-        match self {
-            Mutability::Mut => other,
-            Mutability::Not => Mutability::Not,
-        }
-    }
-
     pub fn invert(self) -> Self {
         match self {
             Mutability::Mut => Mutability::Not,
@@ -996,11 +1006,40 @@ pub struct Local {
     pub id: NodeId,
     pub pat: P<Pat>,
     pub ty: Option<P<Ty>>,
-    /// Initializer expression to set the value, if any.
-    pub init: Option<P<Expr>>,
+    pub kind: LocalKind,
     pub span: Span,
     pub attrs: AttrVec,
     pub tokens: Option<LazyTokenStream>,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub enum LocalKind {
+    /// Local declaration.
+    /// Example: `let x;`
+    Decl,
+    /// Local declaration with an initializer.
+    /// Example: `let x = y;`
+    Init(P<Expr>),
+    /// Local declaration with an initializer and an `else` clause.
+    /// Example: `let Some(x) = y else { return };`
+    InitElse(P<Expr>, P<Block>),
+}
+
+impl LocalKind {
+    pub fn init(&self) -> Option<&Expr> {
+        match self {
+            Self::Decl => None,
+            Self::Init(i) | Self::InitElse(i, _) => Some(i),
+        }
+    }
+
+    pub fn init_else_opt(&self) -> Option<(&Expr, Option<&Block>)> {
+        match self {
+            Self::Decl => None,
+            Self::Init(init) => Some((init, None)),
+            Self::InitElse(init, els) => Some((init, Some(els))),
+        }
+    }
 }
 
 /// An arm of a 'match'.
@@ -1015,7 +1054,7 @@ pub struct Local {
 /// ```
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct Arm {
-    pub attrs: Vec<Attribute>,
+    pub attrs: AttrVec,
     /// Match arm pattern, e.g. `10` in `match foo { 10 => {}, _ => {} }`
     pub pat: P<Pat>,
     /// Match arm guard, e.g. `n > 10` in `match foo { n if n > 10 => {}, _ => {} }`
@@ -1027,9 +1066,9 @@ pub struct Arm {
     pub is_placeholder: bool,
 }
 
-/// Access of a named (e.g., `obj.foo`) or unnamed (e.g., `obj.0`) struct field.
+/// A single field in a struct expression, e.g. `x: value` and `y` in `Foo { x: value, y }`.
 #[derive(Clone, Encodable, Decodable, Debug)]
-pub struct Field {
+pub struct ExprField {
     pub attrs: AttrVec,
     pub id: NodeId,
     pub span: Span,
@@ -1074,7 +1113,7 @@ pub struct Expr {
 
 // `Expr` is used a lot. Make sure it doesn't unintentionally get bigger.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(Expr, 120);
+rustc_data_structures::static_assert_size!(Expr, 104);
 
 impl Expr {
     /// Returns `true` if this expression would be valid somewhere that expects a value;
@@ -1245,6 +1284,14 @@ pub enum StructRest {
 }
 
 #[derive(Clone, Encodable, Decodable, Debug)]
+pub struct StructExpr {
+    pub qself: Option<QSelf>,
+    pub path: Path,
+    pub fields: Vec<ExprField>,
+    pub rest: StructRest,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug)]
 pub enum ExprKind {
     /// A `box x` expression.
     Box(P<Expr>),
@@ -1285,7 +1332,9 @@ pub enum ExprKind {
     Type(P<Expr>, P<Ty>),
     /// A `let pat = expr` expression that is only semantically allowed in the condition
     /// of `if` / `while` expressions. (e.g., `if let 0 = x { .. }`).
-    Let(P<Pat>, P<Expr>),
+    ///
+    /// `Span` represents the whole `let pat = expr` statement.
+    Let(P<Pat>, P<Expr>, Span),
     /// An `if` block, with an optional `else` block.
     ///
     /// `if expr { block } else { expr }`
@@ -1338,7 +1387,7 @@ pub enum ExprKind {
     Field(P<Expr>, Ident),
     /// An indexing operation (e.g., `foo[2]`).
     Index(P<Expr>, P<Expr>),
-    /// A range (e.g., `1..2`, `1..`, `..2`, `1..=2`, `..=2`; and `..` in destructuring assingment).
+    /// A range (e.g., `1..2`, `1..`, `..2`, `1..=2`, `..=2`; and `..` in destructuring assignment).
     Range(Option<P<Expr>>, Option<P<Expr>>, RangeLimits),
     /// An underscore, used in destructuring assignment to ignore a value.
     Underscore,
@@ -1369,7 +1418,7 @@ pub enum ExprKind {
     /// A struct literal expression.
     ///
     /// E.g., `Foo {x: 1, y: 2}`, or `Foo {x: 1, .. rest}`.
-    Struct(Path, Vec<Field>, StructRest),
+    Struct(P<StructExpr>),
 
     /// An array literal constructed from one repeated element.
     ///
@@ -1707,13 +1756,6 @@ impl FloatTy {
             FloatTy::F64 => sym::f64,
         }
     }
-
-    pub fn bit_width(self) -> u64 {
-        match self {
-            FloatTy::F32 => 32,
-            FloatTy::F64 => 64,
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -1749,29 +1791,6 @@ impl IntTy {
             IntTy::I128 => sym::i128,
         }
     }
-
-    pub fn bit_width(&self) -> Option<u64> {
-        Some(match *self {
-            IntTy::Isize => return None,
-            IntTy::I8 => 8,
-            IntTy::I16 => 16,
-            IntTy::I32 => 32,
-            IntTy::I64 => 64,
-            IntTy::I128 => 128,
-        })
-    }
-
-    pub fn normalize(&self, target_width: u32) -> Self {
-        match self {
-            IntTy::Isize => match target_width {
-                16 => IntTy::I16,
-                32 => IntTy::I32,
-                64 => IntTy::I64,
-                _ => unreachable!(),
-            },
-            _ => *self,
-        }
-    }
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, Debug)]
@@ -1805,29 +1824,6 @@ impl UintTy {
             UintTy::U32 => sym::u32,
             UintTy::U64 => sym::u64,
             UintTy::U128 => sym::u128,
-        }
-    }
-
-    pub fn bit_width(&self) -> Option<u64> {
-        Some(match *self {
-            UintTy::Usize => return None,
-            UintTy::U8 => 8,
-            UintTy::U16 => 16,
-            UintTy::U32 => 32,
-            UintTy::U64 => 64,
-            UintTy::U128 => 128,
-        })
-    }
-
-    pub fn normalize(&self, target_width: u32) -> Self {
-        match self {
-            UintTy::Usize => match target_width {
-                16 => UintTy::U16,
-                32 => UintTy::U32,
-                64 => UintTy::U64,
-                _ => unreachable!(),
-            },
-            _ => *self,
         }
     }
 }
@@ -1949,7 +1945,7 @@ impl TyKind {
 }
 
 /// Syntax used to declare a trait object.
-#[derive(Clone, Copy, PartialEq, Encodable, Decodable, Debug)]
+#[derive(Clone, Copy, PartialEq, Encodable, Decodable, Debug, HashStable_Generic)]
 pub enum TraitObjectSyntax {
     Dyn,
     None,
@@ -1974,6 +1970,7 @@ bitflags::bitflags! {
         const NORETURN = 1 << 4;
         const NOSTACK = 1 << 5;
         const ATT_SYNTAX = 1 << 6;
+        const RAW = 1 << 7;
     }
 }
 
@@ -2044,7 +2041,7 @@ pub enum InlineAsmOperand {
         out_expr: Option<P<Expr>>,
     },
     Const {
-        expr: P<Expr>,
+        anon_const: AnonConst,
     },
     Sym {
         expr: P<Expr>,
@@ -2057,7 +2054,9 @@ pub enum InlineAsmOperand {
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct InlineAsm {
     pub template: Vec<InlineAsmTemplatePiece>,
+    pub template_strs: Box<[(Symbol, Option<Symbol>, Span)]>,
     pub operands: Vec<(InlineAsmOperand, Span)>,
+    pub clobber_abi: Option<(Symbol, Span)>,
     pub options: InlineAsmOptions,
     pub line_spans: Vec<Span>,
 }
@@ -2200,9 +2199,6 @@ pub struct FnDecl {
 }
 
 impl FnDecl {
-    pub fn get_self(&self) -> Option<ExplicitSelf> {
-        self.inputs.get(0).and_then(Param::to_self)
-    }
     pub fn has_self(&self) -> bool {
         self.inputs.get(0).map_or(false, Param::is_self)
     }
@@ -2327,14 +2323,6 @@ pub struct ForeignMod {
     pub items: Vec<P<ForeignItem>>,
 }
 
-/// Global inline assembly.
-///
-/// Also known as "module-level assembly" or "file-scoped assembly".
-#[derive(Clone, Encodable, Decodable, Debug, Copy)]
-pub struct GlobalAsm {
-    pub asm: Symbol,
-}
-
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct EnumDef {
     pub variants: Vec<Variant>,
@@ -2343,7 +2331,7 @@ pub struct EnumDef {
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct Variant {
     /// Attributes of the variant.
-    pub attrs: Vec<Attribute>,
+    pub attrs: AttrVec,
     /// Id of the variant (not the constructor, see `VariantData::ctor_id()`).
     pub id: NodeId,
     /// Span
@@ -2519,12 +2507,12 @@ impl VisibilityKind {
     }
 }
 
-/// Field of a struct.
+/// Field definition in a struct, variant or union.
 ///
 /// E.g., `bar: usize` as in `struct Foo { bar: usize }`.
 #[derive(Clone, Encodable, Decodable, Debug)]
-pub struct StructField {
-    pub attrs: Vec<Attribute>,
+pub struct FieldDef {
+    pub attrs: AttrVec,
     pub id: NodeId,
     pub span: Span,
     pub vis: Visibility,
@@ -2540,11 +2528,11 @@ pub enum VariantData {
     /// Struct variant.
     ///
     /// E.g., `Bar { .. }` as in `enum Foo { Bar { .. } }`.
-    Struct(Vec<StructField>, bool),
+    Struct(Vec<FieldDef>, bool),
     /// Tuple variant.
     ///
     /// E.g., `Bar(..)` as in `enum Foo { Bar(..) }`.
-    Tuple(Vec<StructField>, NodeId),
+    Tuple(Vec<FieldDef>, NodeId),
     /// Unit variant.
     ///
     /// E.g., `Bar = ..` as in `enum Foo { Bar = .. }`.
@@ -2553,7 +2541,7 @@ pub enum VariantData {
 
 impl VariantData {
     /// Return the fields of this variant.
-    pub fn fields(&self) -> &[StructField] {
+    pub fn fields(&self) -> &[FieldDef] {
         match *self {
             VariantData::Struct(ref fields, ..) | VariantData::Tuple(ref fields, _) => fields,
             _ => &[],
@@ -2717,7 +2705,7 @@ pub enum ItemKind {
     /// E.g., `extern {}` or `extern "C" {}`.
     ForeignMod(ForeignMod),
     /// Module-level inline assembly (from `global_asm!()`).
-    GlobalAsm(GlobalAsm),
+    GlobalAsm(InlineAsm),
     /// A type alias (`type`).
     ///
     /// E.g., `type Foo = Bar<u8>;`.

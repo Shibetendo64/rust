@@ -2,7 +2,7 @@
 
 use crate::{
     fmt,
-    iter::{ExactSizeIterator, FusedIterator, TrustedLen},
+    iter::{self, ExactSizeIterator, FusedIterator, TrustedLen},
     mem::{self, MaybeUninit},
     ops::Range,
     ptr,
@@ -37,7 +37,7 @@ impl<T, const N: usize> IntoIter<T, N> {
     /// Creates a new iterator over the given `array`.
     ///
     /// *Note*: this method might be deprecated in the future,
-    /// after [`IntoIterator` is implemented for arrays][array-into-iter].
+    /// since [`IntoIterator`] is now implemented for arrays.
     ///
     /// # Examples
     ///
@@ -45,11 +45,16 @@ impl<T, const N: usize> IntoIter<T, N> {
     /// use std::array;
     ///
     /// for value in array::IntoIter::new([1, 2, 3, 4, 5]) {
-    ///     // The type of `value` is a `i32` here, instead of `&i32`
+    ///     // The type of `value` is an `i32` here, instead of `&i32`
+    ///     let _: i32 = value;
+    /// }
+    ///
+    /// // Since Rust 1.53, arrays implement IntoIterator directly:
+    /// for value in [1, 2, 3, 4, 5] {
+    ///     // The type of `value` is an `i32` here, instead of `&i32`
     ///     let _: i32 = value;
     /// }
     /// ```
-    /// [array-into-iter]: https://github.com/rust-lang/rust/pull/65819
     #[stable(feature = "array_value_iter", since = "1.51.0")]
     pub fn new(array: [T; N]) -> Self {
         // SAFETY: The transmute here is actually safe. The docs of `MaybeUninit`
@@ -123,6 +128,27 @@ impl<T, const N: usize> Iterator for IntoIter<T, N> {
         (len, Some(len))
     }
 
+    #[inline]
+    fn fold<Acc, Fold>(mut self, init: Acc, mut fold: Fold) -> Acc
+    where
+        Fold: FnMut(Acc, Self::Item) -> Acc,
+    {
+        let data = &mut self.data;
+        // FIXME: This uses try_fold(&mut iter) instead of fold(iter) because the latter
+        //  would go through the blanket `impl Iterator for &mut I` implementation
+        //  which lacks inline annotations on its methods and adding those would be a larger
+        //  perturbation than using try_fold here.
+        //  Whether it would be beneficial to add those annotations should be investigated separately.
+        (&mut self.alive)
+            .try_fold::<_, _, Result<_, !>>(init, |acc, idx| {
+                // SAFETY: idx is obtained by folding over the `alive` range, which implies the
+                // value is currently considered alive but as the range is being consumed each value
+                // we read here will only be read once and then considered dead.
+                Ok(fold(acc, unsafe { data.get_unchecked(idx).assume_init_read() }))
+            })
+            .unwrap()
+    }
+
     fn count(self) -> usize {
         self.len()
     }
@@ -192,7 +218,7 @@ impl<T: Clone, const N: usize> Clone for IntoIter<T, N> {
         let mut new = Self { data: MaybeUninit::uninit_array(), alive: 0..0 };
 
         // Clone all alive elements.
-        for (src, dst) in self.as_slice().iter().zip(&mut new.data) {
+        for (src, dst) in iter::zip(self.as_slice(), &mut new.data) {
             // Write a clone into the new array, then update its alive range.
             // If cloning panics, we'll correctly drop the previous items.
             dst.write(src.clone());

@@ -1,3 +1,8 @@
+// This code used to be a part of `rustc` but moved to Clippy as a result of
+// https://github.com/rust-lang/rust/issues/76618. Because of that, it contains unused code and some
+// of terminologies might not be relevant in the context of Clippy. Note that its behavior might
+// differ from the time of `rustc` even if the name stays the same.
+
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{
@@ -6,6 +11,7 @@ use rustc_middle::mir::{
 };
 use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::{self, adjustment::PointerCast, Ty, TyCtxt};
+use rustc_semver::RustcVersion;
 use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_target::spec::abi::Abi::RustIntrinsic;
@@ -13,7 +19,7 @@ use std::borrow::Cow;
 
 type McfResult = Result<(), (Span, Cow<'static, str>)>;
 
-pub fn is_min_const_fn(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>) -> McfResult {
+pub fn is_min_const_fn(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>, msrv: Option<&RustcVersion>) -> McfResult {
     let def_id = body.source.def_id();
     let mut current = def_id;
     loop {
@@ -30,7 +36,8 @@ pub fn is_min_const_fn(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>) -> McfResult {
                 ty::PredicateKind::ObjectSafe(_) => panic!("object safe predicate on function: {:#?}", predicate),
                 ty::PredicateKind::ClosureKind(..) => panic!("closure kind predicate on function: {:#?}", predicate),
                 ty::PredicateKind::Subtype(_) => panic!("subtype predicate on function: {:#?}", predicate),
-                ty::PredicateKind::Trait(pred, _) => {
+                ty::PredicateKind::Coerce(_) => panic!("coerce predicate on function: {:#?}", predicate),
+                ty::PredicateKind::Trait(pred) => {
                     if Some(pred.def_id()) == tcx.lang_items().sized_trait() {
                         continue;
                     }
@@ -70,7 +77,7 @@ pub fn is_min_const_fn(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>) -> McfResult {
     )?;
 
     for bb in body.basic_blocks() {
-        check_terminator(tcx, body, bb.terminator())?;
+        check_terminator(tcx, body, bb.terminator(), msrv)?;
         for stmt in &bb.statements {
             check_statement(tcx, body, def_id, stmt)?;
         }
@@ -79,7 +86,7 @@ pub fn is_min_const_fn(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>) -> McfResult {
 }
 
 fn check_ty(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, span: Span) -> McfResult {
-    for arg in ty.walk() {
+    for arg in ty.walk(tcx) {
         let ty = match arg.unpack() {
             GenericArgKind::Type(ty) => ty,
 
@@ -185,7 +192,7 @@ fn check_rvalue(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, def_id: DefId, rvalue: &Rv
                 ))
             }
         },
-        Rvalue::NullaryOp(NullOp::SizeOf, _) => Ok(()),
+        Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf, _) => Ok(()),
         Rvalue::NullaryOp(NullOp::Box, _) => Err((span, "heap allocations are not allowed in const fn".into())),
         Rvalue::UnaryOp(_, operand) => {
             let ty = operand.ty(body, tcx);
@@ -210,21 +217,19 @@ fn check_statement(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, def_id: DefId, statemen
         StatementKind::Assign(box (place, rval)) => {
             check_place(tcx, *place, span, body)?;
             check_rvalue(tcx, body, def_id, rval, span)
-        }
+        },
 
-        StatementKind::FakeRead(_, place) |
+        StatementKind::FakeRead(box (_, place)) => check_place(tcx, *place, span, body),
         // just an assignment
         StatementKind::SetDiscriminant { place, .. } => check_place(tcx, **place, span, body),
 
         StatementKind::LlvmInlineAsm { .. } => Err((span, "cannot use inline assembly in const fn".into())),
 
-        StatementKind::CopyNonOverlapping(box rustc_middle::mir::CopyNonOverlapping{
-          dst, src, count,
-        }) => {
-          check_operand(tcx, dst, span, body)?;
-          check_operand(tcx, src, span, body)?;
-          check_operand(tcx, count, span, body)
-        }
+        StatementKind::CopyNonOverlapping(box rustc_middle::mir::CopyNonOverlapping { dst, src, count }) => {
+            check_operand(tcx, dst, span, body)?;
+            check_operand(tcx, src, span, body)?;
+            check_operand(tcx, count, span, body)
+        },
         // These are all NOPs
         StatementKind::StorageLive(_)
         | StatementKind::StorageDead(_)
@@ -251,7 +256,7 @@ fn check_place(tcx: TyCtxt<'tcx>, place: Place<'tcx>, span: Span, body: &Body<'t
         cursor = proj_base;
         match elem {
             ProjectionElem::Field(..) => {
-                let base_ty = Place::ty_from(place.local, &proj_base, body, tcx).ty;
+                let base_ty = Place::ty_from(place.local, proj_base, body, tcx).ty;
                 if let Some(def) = base_ty.ty_adt_def() {
                     // No union field accesses in `const fn`
                     if def.is_union() {
@@ -270,7 +275,12 @@ fn check_place(tcx: TyCtxt<'tcx>, place: Place<'tcx>, span: Span, body: &Body<'t
     Ok(())
 }
 
-fn check_terminator(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>, terminator: &Terminator<'tcx>) -> McfResult {
+fn check_terminator(
+    tcx: TyCtxt<'tcx>,
+    body: &'a Body<'tcx>,
+    terminator: &Terminator<'tcx>,
+    msrv: Option<&RustcVersion>,
+) -> McfResult {
     let span = terminator.source_info.span;
     match &terminator.kind {
         TerminatorKind::FalseEdge { .. }
@@ -307,7 +317,7 @@ fn check_terminator(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>, terminator: &Termin
         } => {
             let fn_ty = func.ty(body, tcx);
             if let ty::FnDef(fn_def_id, _) = *fn_ty.kind() {
-                if !rustc_mir::const_eval::is_min_const_fn(tcx, fn_def_id) {
+                if !is_const_fn(tcx, fn_def_id, msrv) {
                     return Err((
                         span,
                         format!(
@@ -351,4 +361,23 @@ fn check_terminator(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>, terminator: &Termin
 
         TerminatorKind::InlineAsm { .. } => Err((span, "cannot use inline assembly in const fn".into())),
     }
+}
+
+fn is_const_fn(tcx: TyCtxt<'_>, def_id: DefId, msrv: Option<&RustcVersion>) -> bool {
+    rustc_const_eval::const_eval::is_const_fn(tcx, def_id)
+        && tcx.lookup_const_stability(def_id).map_or(true, |const_stab| {
+            if let rustc_attr::StabilityLevel::Stable { since } = const_stab.level {
+                // Checking MSRV is manually necessary because `rustc` has no such concept. This entire
+                // function could be removed if `rustc` provided a MSRV-aware version of `is_const_fn`.
+                // as a part of an unimplemented MSRV check https://github.com/rust-lang/rust/issues/65262.
+                crate::meets_msrv(
+                    msrv,
+                    &RustcVersion::parse(&since.as_str())
+                        .expect("`rustc_attr::StabilityLevel::Stable::since` is ill-formatted"),
+                )
+            } else {
+                // Unstable const fn with the feature enabled.
+                msrv.is_none()
+            }
+        })
 }

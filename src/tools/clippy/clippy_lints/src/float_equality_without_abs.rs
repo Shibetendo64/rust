@@ -1,4 +1,5 @@
-use crate::utils::{match_def_path, paths, span_lint_and_then, sugg};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::{match_def_path, paths, sugg};
 use if_chain::if_chain;
 use rustc_ast::util::parser::AssocOp;
 use rustc_errors::Applicability;
@@ -10,32 +11,34 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::Spanned;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for statements of the form `(a - b) < f32::EPSILON` or
-     /// `(a - b) < f64::EPSILON`. Notes the missing `.abs()`.
-     ///
-     /// **Why is this bad?** The code without `.abs()` is more likely to have a bug.
-     ///
-     /// **Known problems:** If the user can ensure that b is larger than a, the `.abs()` is
-     /// technically unneccessary. However, it will make the code more robust and doesn't have any
-     /// large performance implications. If the abs call was deliberately left out for performance
-     /// reasons, it is probably better to state this explicitly in the code, which then can be done
-     /// with an allow.
-     ///
-     /// **Example:**
-     ///
-     /// ```rust
-     /// pub fn is_roughly_equal(a: f32, b: f32) -> bool {
-     ///     (a - b) < f32::EPSILON
-     /// }
-     /// ```
-     /// Use instead:
-     /// ```rust
-     /// pub fn is_roughly_equal(a: f32, b: f32) -> bool {
-     ///     (a - b).abs() < f32::EPSILON
-     /// }
-     /// ```
+    /// ### What it does
+    /// Checks for statements of the form `(a - b) < f32::EPSILON` or
+    /// `(a - b) < f64::EPSILON`. Notes the missing `.abs()`.
+    ///
+    /// ### Why is this bad?
+    /// The code without `.abs()` is more likely to have a bug.
+    ///
+    /// ### Known problems
+    /// If the user can ensure that b is larger than a, the `.abs()` is
+    /// technically unneccessary. However, it will make the code more robust and doesn't have any
+    /// large performance implications. If the abs call was deliberately left out for performance
+    /// reasons, it is probably better to state this explicitly in the code, which then can be done
+    /// with an allow.
+    ///
+    /// ### Example
+    /// ```rust
+    /// pub fn is_roughly_equal(a: f32, b: f32) -> bool {
+    ///     (a - b) < f32::EPSILON
+    /// }
+    /// ```
+    /// Use instead:
+    /// ```rust
+    /// pub fn is_roughly_equal(a: f32, b: f32) -> bool {
+    ///     (a - b).abs() < f32::EPSILON
+    /// }
+    /// ```
     pub FLOAT_EQUALITY_WITHOUT_ABS,
-    correctness,
+    suspicious,
     "float equality check without `.abs()`"
 }
 
@@ -47,7 +50,7 @@ impl<'tcx> LateLintPass<'tcx> for FloatEqualityWithoutAbs {
         let rhs;
 
         // check if expr is a binary expression with a lt or gt operator
-        if let ExprKind::Binary(op, ref left, ref right) = expr.kind {
+        if let ExprKind::Binary(op, left, right) = expr.kind {
             match op.node {
                 BinOpKind::Lt => {
                     lhs = left;
@@ -87,8 +90,8 @@ impl<'tcx> LateLintPass<'tcx> for FloatEqualityWithoutAbs {
             if let ty::Float(_) = t_val_r.kind();
 
             then {
-                let sug_l = sugg::Sugg::hir(cx, &val_l, "..");
-                let sug_r = sugg::Sugg::hir(cx, &val_r, "..");
+                let sug_l = sugg::Sugg::hir(cx, val_l, "..");
+                let sug_r = sugg::Sugg::hir(cx, val_r, "..");
                 // format the suggestion
                 let suggestion = format!("{}.abs()", sugg::make_assoc(AssocOp::Subtract, &sug_l, &sug_r).maybe_par());
                 // spans the lint

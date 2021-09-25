@@ -94,6 +94,7 @@ impl fmt::Debug for Scope {
             ScopeData::CallSite => write!(fmt, "CallSite({:?})", self.id),
             ScopeData::Arguments => write!(fmt, "Arguments({:?})", self.id),
             ScopeData::Destruction => write!(fmt, "Destruction({:?})", self.id),
+            ScopeData::IfThen => write!(fmt, "IfThen({:?})", self.id),
             ScopeData::Remainder(fsi) => write!(
                 fmt,
                 "Remainder {{ block: {:?}, first_statement_index: {}}}",
@@ -119,6 +120,10 @@ pub enum ScopeData {
 
     /// Scope of destructors for temporaries of node-id.
     Destruction,
+
+    /// Scope of the condition and then block of an if expression
+    /// Used for variables introduced in an if-let expression.
+    IfThen,
 
     /// Scope following a `let id = expr;` binding in a block.
     Remainder(FirstStatementIndex),
@@ -151,7 +156,7 @@ rustc_index::newtype_index! {
 static_assert_size!(ScopeData, 4);
 
 impl Scope {
-    /// Returns a item-local ID associated with this scope.
+    /// Returns an item-local ID associated with this scope.
     ///
     /// N.B., likely to be replaced as API is refined; e.g., pnkfelix
     /// anticipates `fn entry_node_id` and `fn each_exit_node_id`.
@@ -189,7 +194,7 @@ impl Scope {
                 // To avoid issues with macro-generated spans, the span
                 // of the statement must be nested in that of the block.
                 if span.lo() <= stmt_span.lo() && stmt_span.lo() <= span.hi() {
-                    return Span::new(stmt_span.lo(), span.hi(), span.ctxt());
+                    return span.with_lo(stmt_span.lo());
                 }
             }
         }
@@ -235,18 +240,6 @@ pub struct ScopeTree {
     /// escape into 'static and should have no local cleanup scope.
     rvalue_scopes: FxHashMap<hir::ItemLocalId, Option<Scope>>,
 
-    /// Encodes the hierarchy of fn bodies. Every fn body (including
-    /// closures) forms its own distinct region hierarchy, rooted in
-    /// the block that is the fn body. This map points from the ID of
-    /// that root block to the ID of the root block for the enclosing
-    /// fn, if any. Thus the map structures the fn bodies into a
-    /// hierarchy based on their lexical mapping. This is used to
-    /// handle the relationships between regions in a fn and in a
-    /// closure defined by that fn. See the "Modeling closures"
-    /// section of the README in infer::region_constraints for
-    /// more details.
-    closure_tree: FxHashMap<hir::ItemLocalId, hir::ItemLocalId>,
-
     /// If there are any `yield` nested within a scope, this map
     /// stores the `Span` of the last one and its index in the
     /// postorder of the Visitor traversal on the HIR.
@@ -264,7 +257,8 @@ pub struct ScopeTree {
     /// ```
     ///
     /// With the HIR tree (calls numbered for expository purposes)
-    /// ```
+    ///
+    /// ```text
     ///     Call#0(foo, [Call#1(f), Yield(y), Call#2(bar, Call#3(g))])
     /// ```
     ///
@@ -356,23 +350,6 @@ impl ScopeTree {
         self.destruction_scopes.get(&n).cloned()
     }
 
-    /// Records that `sub_closure` is defined within `sup_closure`. These IDs
-    /// should be the ID of the block that is the fn body, which is
-    /// also the root of the region hierarchy for that fn.
-    pub fn record_closure_parent(
-        &mut self,
-        sub_closure: hir::ItemLocalId,
-        sup_closure: hir::ItemLocalId,
-    ) {
-        debug!(
-            "record_closure_parent(sub_closure={:?}, sup_closure={:?})",
-            sub_closure, sup_closure
-        );
-        assert!(sub_closure != sup_closure);
-        let previous = self.closure_tree.insert(sub_closure, sup_closure);
-        assert!(previous.is_none());
-    }
-
     pub fn record_var_scope(&mut self, var: hir::ItemLocalId, lifetime: Scope) {
         debug!("record_var_scope(sub={:?}, sup={:?})", var, lifetime);
         assert!(var != lifetime.item_local_id());
@@ -430,6 +407,8 @@ impl ScopeTree {
 
     /// Returns `true` if `subscope` is equal to or is lexically nested inside `superscope`, and
     /// `false` otherwise.
+    ///
+    /// Used by clippy.
     pub fn is_subscope_of(&self, subscope: Scope, superscope: Scope) -> bool {
         let mut s = subscope;
         debug!("is_subscope_of({:?}, {:?})", subscope, superscope);
@@ -472,7 +451,6 @@ impl<'a> HashStable<StableHashingContext<'a>> for ScopeTree {
             ref var_map,
             ref destruction_scopes,
             ref rvalue_scopes,
-            ref closure_tree,
             ref yield_in_scope,
         } = *self;
 
@@ -486,7 +464,6 @@ impl<'a> HashStable<StableHashingContext<'a>> for ScopeTree {
         var_map.hash_stable(hcx, hasher);
         destruction_scopes.hash_stable(hcx, hasher);
         rvalue_scopes.hash_stable(hcx, hasher);
-        closure_tree.hash_stable(hcx, hasher);
         yield_in_scope.hash_stable(hcx, hasher);
     }
 }

@@ -1,5 +1,7 @@
 use crate::fmt;
-use crate::iter::adapters::{zip::try_get_unchecked, SourceIter, TrustedRandomAccess};
+use crate::iter::adapters::{
+    zip::try_get_unchecked, SourceIter, TrustedRandomAccess, TrustedRandomAccessNoCoerce,
+};
 use crate::iter::{FusedIterator, InPlaceIterable, TrustedLen};
 use crate::ops::Try;
 
@@ -57,7 +59,8 @@ use crate::ops::Try;
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct Map<I, F> {
-    iter: I,
+    // Used for `SplitWhitespace` and `SplitAsciiWhitespace` `as_str` methods
+    pub(crate) iter: I,
     f: F,
 }
 
@@ -109,7 +112,7 @@ where
     where
         Self: Sized,
         G: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_fold(init, map_try_fold(&mut self.f, g))
     }
@@ -121,9 +124,10 @@ where
         self.iter.fold(init, map_fold(self.f, g))
     }
 
+    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> B
     where
-        Self: TrustedRandomAccess,
+        Self: TrustedRandomAccessNoCoerce,
     {
         // SAFETY: the caller must uphold the contract for
         // `Iterator::__iterator_get_unchecked`.
@@ -145,7 +149,7 @@ where
     where
         Self: Sized,
         G: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_rfold(init, map_try_fold(&mut self.f, g))
     }
@@ -185,9 +189,13 @@ where
 
 #[doc(hidden)]
 #[unstable(feature = "trusted_random_access", issue = "none")]
-unsafe impl<I, F> TrustedRandomAccess for Map<I, F>
+unsafe impl<I, F> TrustedRandomAccess for Map<I, F> where I: TrustedRandomAccess {}
+
+#[doc(hidden)]
+#[unstable(feature = "trusted_random_access", issue = "none")]
+unsafe impl<I, F> TrustedRandomAccessNoCoerce for Map<I, F>
 where
-    I: TrustedRandomAccess,
+    I: TrustedRandomAccessNoCoerce,
 {
     const MAY_HAVE_SIDE_EFFECT: bool = true;
 }

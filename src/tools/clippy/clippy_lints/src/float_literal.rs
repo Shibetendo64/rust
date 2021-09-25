@@ -1,4 +1,5 @@
-use crate::utils::{numeric_literal, span_lint_and_sugg};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::numeric_literal;
 use if_chain::if_chain;
 use rustc_ast::ast::{self, LitFloatType, LitKind};
 use rustc_errors::Applicability;
@@ -9,15 +10,14 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use std::fmt;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for float literals with a precision greater
+    /// ### What it does
+    /// Checks for float literals with a precision greater
     /// than that supported by the underlying type.
     ///
-    /// **Why is this bad?** Rust will truncate the literal silently.
+    /// ### Why is this bad?
+    /// Rust will truncate the literal silently.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// // Bad
     /// let v: f32 = 0.123_456_789_9;
@@ -33,16 +33,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for whole number float literals that
+    /// ### What it does
+    /// Checks for whole number float literals that
     /// cannot be represented as the underlying type without loss.
     ///
-    /// **Why is this bad?** Rust will silently lose precision during
+    /// ### Why is this bad?
+    /// Rust will silently lose precision during
     /// conversion to a float.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// // Bad
     /// let _: f32 = 16_777_217.0; // 16_777_216.0
@@ -60,8 +59,8 @@ declare_lint_pass!(FloatLiteral => [EXCESSIVE_PRECISION, LOSSY_FLOAT_LITERAL]);
 
 impl<'tcx> LateLintPass<'tcx> for FloatLiteral {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
+        let ty = cx.typeck_results().expr_ty(expr);
         if_chain! {
-            let ty = cx.typeck_results().expr_ty(expr);
             if let ty::Float(fty) = *ty.kind();
             if let hir::ExprKind::Lit(ref lit) = expr.kind;
             if let LitKind::Float(sym, lit_float_ty) = lit.node;

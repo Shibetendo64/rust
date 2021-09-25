@@ -5,10 +5,7 @@
 
 #![no_std]
 #![unstable(feature = "panic_abort", issue = "32837")]
-#![doc(
-    html_root_url = "https://doc.rust-lang.org/nightly/",
-    issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/"
-)]
+#![doc(issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/")]
 #![panic_runtime]
 #![allow(unused_features)]
 #![feature(core_intrinsics)]
@@ -18,6 +15,10 @@
 #![feature(staged_api)]
 #![feature(rustc_attrs)]
 #![feature(asm)]
+#![feature(c_unwind)]
+
+#[cfg(target_os = "android")]
+mod android;
 
 use core::any::Any;
 use core::panic::BoxMeUp;
@@ -30,7 +31,11 @@ pub unsafe extern "C" fn __rust_panic_cleanup(_: *mut u8) -> *mut (dyn Any + Sen
 
 // "Leak" the payload and shim to the relevant abort on the platform in question.
 #[rustc_std_internal_symbol]
-pub unsafe extern "C" fn __rust_start_panic(_payload: *mut &mut dyn BoxMeUp) -> u32 {
+pub unsafe extern "C-unwind" fn __rust_start_panic(_payload: *mut &mut dyn BoxMeUp) -> u32 {
+    // Android has the ability to attach a message as part of the abort.
+    #[cfg(target_os = "android")]
+    android::android_set_abort_message(_payload);
+
     abort();
 
     cfg_if::cfg_if! {

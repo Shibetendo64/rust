@@ -59,6 +59,7 @@ impl TypeRelation<'tcx> for Equate<'combine, 'infcx, 'tcx> {
     fn relate_with_variance<T: Relate<'tcx>>(
         &mut self,
         _: ty::Variance,
+        _info: ty::VarianceDiagInfo<'tcx>,
         a: T,
         b: T,
     ) -> RelateResult<'tcx, T> {
@@ -104,7 +105,7 @@ impl TypeRelation<'tcx> for Equate<'combine, 'infcx, 'tcx> {
         b: ty::Region<'tcx>,
     ) -> RelateResult<'tcx, ty::Region<'tcx>> {
         debug!("{}.regions({:?}, {:?})", self.tag(), a, b);
-        let origin = Subtype(box self.fields.trace.clone());
+        let origin = Subtype(Box::new(self.fields.trace.clone()));
         self.fields
             .infcx
             .inner
@@ -124,9 +125,9 @@ impl TypeRelation<'tcx> for Equate<'combine, 'infcx, 'tcx> {
 
     fn binders<T>(
         &mut self,
-        a: ty::Binder<T>,
-        b: ty::Binder<T>,
-    ) -> RelateResult<'tcx, ty::Binder<T>>
+        a: ty::Binder<'tcx, T>,
+        b: ty::Binder<'tcx, T>,
+    ) -> RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
         T: Relate<'tcx>,
     {

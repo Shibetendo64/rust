@@ -348,7 +348,7 @@ macro_rules! make_mir_visitor {
                         ty::InstanceDef::VtableShim(_def_id) |
                         ty::InstanceDef::ReifyShim(_def_id) |
                         ty::InstanceDef::Virtual(_def_id, _) |
-                        ty::InstanceDef::ClosureOnceShim { call_once: _def_id } |
+                        ty::InstanceDef::ClosureOnceShim { call_once: _def_id, track_caller: _ } |
                         ty::InstanceDef::DropGlue(_def_id, None) => {}
 
                         ty::InstanceDef::FnPtrShim(_def_id, ty) |
@@ -380,7 +380,7 @@ macro_rules! make_mir_visitor {
                     ) => {
                         self.visit_assign(place, rvalue, location);
                     }
-                    StatementKind::FakeRead(_, place) => {
+                    StatementKind::FakeRead(box (_, place)) => {
                         self.visit_place(
                             place,
                             PlaceContext::NonMutatingUse(NonMutatingUseContext::Inspect),
@@ -584,18 +584,15 @@ macro_rules! make_mir_visitor {
                     } => {
                         for op in operands {
                             match op {
-                                InlineAsmOperand::In { value, .. }
-                                | InlineAsmOperand::Const { value } => {
+                                InlineAsmOperand::In { value, .. } => {
                                     self.visit_operand(value, location);
                                 }
-                                InlineAsmOperand::Out { place, .. } => {
-                                    if let Some(place) = place {
-                                        self.visit_place(
-                                            place,
-                                            PlaceContext::MutatingUse(MutatingUseContext::Store),
-                                            location,
-                                        );
-                                    }
+                                InlineAsmOperand::Out { place: Some(place), .. } => {
+                                    self.visit_place(
+                                        place,
+                                        PlaceContext::MutatingUse(MutatingUseContext::Store),
+                                        location,
+                                    );
                                 }
                                 InlineAsmOperand::InOut { in_value, out_place, .. } => {
                                     self.visit_operand(in_value, location);
@@ -607,10 +604,12 @@ macro_rules! make_mir_visitor {
                                         );
                                     }
                                 }
-                                InlineAsmOperand::SymFn { value } => {
+                                InlineAsmOperand::Const { value }
+                                | InlineAsmOperand::SymFn { value } => {
                                     self.visit_constant(value, location);
                                 }
-                                InlineAsmOperand::SymStatic { def_id: _ } => {}
+                                InlineAsmOperand::Out { place: None, .. }
+                                | InlineAsmOperand::SymStatic { def_id: _ } => {}
                             }
                         }
                     }
@@ -871,7 +870,10 @@ macro_rules! make_mir_visitor {
 
                 self.visit_span(span);
                 drop(user_ty); // no visit method for this
-                self.visit_const(literal, location);
+                match literal {
+                    ConstantKind::Ty(ct) => self.visit_const(ct, location),
+                    ConstantKind::Val(_, t) => self.visit_ty(t, TyContext::Location(location)),
+                }
             }
 
             fn super_span(&mut self, _span: & $($mutability)? Span) {
@@ -1199,7 +1201,7 @@ pub enum NonUseContext {
     StorageDead,
     /// User type annotation assertions for NLL.
     AscribeUserTy,
-    /// The data of an user variable, for debug info.
+    /// The data of a user variable, for debug info.
     VarDebugInfo,
 }
 
@@ -1242,12 +1244,6 @@ impl PlaceContext {
     #[inline]
     pub fn is_mutating_use(&self) -> bool {
         matches!(self, PlaceContext::MutatingUse(..))
-    }
-
-    /// Returns `true` if this place context represents a use that does not change the value.
-    #[inline]
-    pub fn is_nonmutating_use(&self) -> bool {
-        matches!(self, PlaceContext::NonMutatingUse(..))
     }
 
     /// Returns `true` if this place context represents a use.

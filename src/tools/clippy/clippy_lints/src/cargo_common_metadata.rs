@@ -1,29 +1,26 @@
 //! lint on missing cargo common metadata
 
-use std::path::PathBuf;
-
-use crate::utils::{run_lints, span_lint};
+use clippy_utils::{diagnostics::span_lint, is_lint_allowed};
 use rustc_hir::{hir_id::CRATE_HIR_ID, Crate};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::DUMMY_SP;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks to see if all common metadata is defined in
+    /// ### What it does
+    /// Checks to see if all common metadata is defined in
     /// `Cargo.toml`. See: https://rust-lang-nursery.github.io/api-guidelines/documentation.html#cargotoml-includes-all-common-metadata-c-metadata
     ///
-    /// **Why is this bad?** It will be more difficult for users to discover the
+    /// ### Why is this bad?
+    /// It will be more difficult for users to discover the
     /// purpose of the crate, and key information related to it.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```toml
-    /// # This `Cargo.toml` is missing an authors field:
+    /// # This `Cargo.toml` is missing a description field:
     /// [package]
     /// name = "clippy"
     /// version = "0.0.212"
-    /// description = "A bunch of helpful lints to avoid common pitfalls in Rust"
     /// repository = "https://github.com/rust-lang/rust-clippy"
     /// readme = "README.md"
     /// license = "MIT OR Apache-2.0"
@@ -31,14 +28,13 @@ declare_clippy_lint! {
     /// categories = ["development-tools", "development-tools::cargo-plugins"]
     /// ```
     ///
-    /// Should include an authors field like:
+    /// Should include a description field like:
     ///
     /// ```toml
     /// # This `Cargo.toml` includes all common metadata
     /// [package]
     /// name = "clippy"
     /// version = "0.0.212"
-    /// authors = ["Someone <someone@rust-lang.org>"]
     /// description = "A bunch of helpful lints to avoid common pitfalls in Rust"
     /// repository = "https://github.com/rust-lang/rust-clippy"
     /// readme = "README.md"
@@ -71,12 +67,8 @@ fn missing_warning(cx: &LateContext<'_>, package: &cargo_metadata::Package, fiel
     span_lint(cx, CARGO_COMMON_METADATA, DUMMY_SP, &message);
 }
 
-fn is_empty_str(value: &Option<String>) -> bool {
-    value.as_ref().map_or(true, String::is_empty)
-}
-
-fn is_empty_path(value: &Option<PathBuf>) -> bool {
-    value.as_ref().and_then(|x| x.to_str()).map_or(true, str::is_empty)
+fn is_empty_str<T: AsRef<std::ffi::OsStr>>(value: &Option<T>) -> bool {
+    value.as_ref().map_or(true, |s| s.as_ref().is_empty())
 }
 
 fn is_empty_vec(value: &[String]) -> bool {
@@ -86,7 +78,7 @@ fn is_empty_vec(value: &[String]) -> bool {
 
 impl LateLintPass<'_> for CargoCommonMetadata {
     fn check_crate(&mut self, cx: &LateContext<'_>, _: &Crate<'_>) {
-        if !run_lints(cx, &[CARGO_COMMON_METADATA], CRATE_HIR_ID) {
+        if is_lint_allowed(cx, CARGO_COMMON_METADATA, CRATE_HIR_ID) {
             return;
         }
 
@@ -96,15 +88,11 @@ impl LateLintPass<'_> for CargoCommonMetadata {
             // only run the lint if publish is `None` (`publish = true` or skipped entirely)
             // or if the vector isn't empty (`publish = ["something"]`)
             if package.publish.as_ref().filter(|publish| publish.is_empty()).is_none() || self.ignore_publish {
-                if is_empty_vec(&package.authors) {
-                    missing_warning(cx, &package, "package.authors");
-                }
-
                 if is_empty_str(&package.description) {
                     missing_warning(cx, &package, "package.description");
                 }
 
-                if is_empty_str(&package.license) && is_empty_path(&package.license_file) {
+                if is_empty_str(&package.license) && is_empty_str(&package.license_file) {
                     missing_warning(cx, &package, "either package.license or package.license_file");
                 }
 
@@ -112,7 +100,7 @@ impl LateLintPass<'_> for CargoCommonMetadata {
                     missing_warning(cx, &package, "package.repository");
                 }
 
-                if is_empty_path(&package.readme) {
+                if is_empty_str(&package.readme) {
                     missing_warning(cx, &package, "package.readme");
                 }
 

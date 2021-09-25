@@ -2,9 +2,8 @@
 mod tests;
 
 use crate::fmt;
-use crate::sync::{mutex, MutexGuard, PoisonError};
+use crate::sync::{mutex, poison, LockResult, MutexGuard, PoisonError};
 use crate::sys_common::condvar as sys;
-use crate::sys_common::poison::{self, LockResult};
 use crate::time::{Duration, Instant};
 
 /// A type indicating whether a timed wait on a condition variable returned
@@ -255,7 +254,7 @@ impl Condvar {
     /// except that the thread will be blocked for roughly no longer
     /// than `ms` milliseconds. This method should not be used for
     /// precise timing due to anomalies such as preemption or platform
-    /// differences that may not cause the maximum amount of time
+    /// differences that might not cause the maximum amount of time
     /// waited to be precisely `ms`.
     ///
     /// Note that the best effort is made to ensure that the time waited is
@@ -318,7 +317,7 @@ impl Condvar {
     /// The semantics of this function are equivalent to [`wait`] except that
     /// the thread will be blocked for roughly no longer than `dur`. This
     /// method should not be used for precise timing due to anomalies such as
-    /// preemption or platform differences that may not cause the maximum
+    /// preemption or platform differences that might not cause the maximum
     /// amount of time waited to be precisely `dur`.
     ///
     /// Note that the best effort is made to ensure that the time waited is
@@ -393,7 +392,7 @@ impl Condvar {
     /// The semantics of this function are equivalent to [`wait_while`] except
     /// that the thread will be blocked for roughly no longer than `dur`. This
     /// method should not be used for precise timing due to anomalies such as
-    /// preemption or platform differences that may not cause the maximum
+    /// preemption or platform differences that might not cause the maximum
     /// amount of time waited to be precisely `dur`.
     ///
     /// Note that the best effort is made to ensure that the time waited is
@@ -548,7 +547,7 @@ impl Condvar {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Condvar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Condvar { .. }")
+        f.debug_struct("Condvar").finish_non_exhaustive()
     }
 }
 

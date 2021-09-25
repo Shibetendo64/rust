@@ -410,7 +410,7 @@ impl<'a> TraitDef<'a> {
                         .any(|param| matches!(param.kind, ast::GenericParamKind::Type { .. })),
                     _ => unreachable!(),
                 };
-                let container_id = cx.current_expansion.id.expn_data().parent;
+                let container_id = cx.current_expansion.id.expn_data().parent.expect_local();
                 let always_copy = has_no_type_params && cx.resolver.has_derive_copy(container_id);
                 let use_temporaries = is_packed && always_copy;
 
@@ -527,12 +527,12 @@ impl<'a> TraitDef<'a> {
                     tokens: None,
                 },
                 attrs: Vec::new(),
-                kind: ast::AssocItemKind::TyAlias(box ast::TyAliasKind(
+                kind: ast::AssocItemKind::TyAlias(Box::new(ast::TyAliasKind(
                     ast::Defaultness::Final,
                     Generics::default(),
                     Vec::new(),
                     Some(type_def.to_ty(cx, self.span, type_ident, generics)),
-                )),
+                ))),
                 tokens: None,
             })
         });
@@ -541,7 +541,7 @@ impl<'a> TraitDef<'a> {
             self.generics.to_generics(cx, self.span, type_ident, generics);
 
         // Create the generic parameters
-        params.extend(generics.params.iter().map(|param| match param.kind {
+        params.extend(generics.params.iter().map(|param| match &param.kind {
             GenericParamKind::Lifetime { .. } => param.clone(),
             GenericParamKind::Type { .. } => {
                 // I don't think this can be moved out of the loop, since
@@ -561,7 +561,18 @@ impl<'a> TraitDef<'a> {
 
                 cx.typaram(self.span, param.ident, vec![], bounds, None)
             }
-            GenericParamKind::Const { .. } => param.clone(),
+            GenericParamKind::Const { ty, kw_span, .. } => {
+                let const_nodefault_kind = GenericParamKind::Const {
+                    ty: ty.clone(),
+                    kw_span: kw_span.clone(),
+
+                    // We can't have default values inside impl block
+                    default: None,
+                };
+                let mut param_clone = param.clone();
+                param_clone.kind = const_nodefault_kind;
+                param_clone
+            }
         }));
 
         // and similarly for where clauses
@@ -666,8 +677,6 @@ impl<'a> TraitDef<'a> {
         let self_type = cx.ty_path(path);
 
         let attr = cx.attribute(cx.meta_word(self.span, sym::automatically_derived));
-        // Just mark it now since we know that it'll end up used downstream
-        cx.sess.mark_attr_used(&attr);
         let opt_trait_ref = Some(trait_ref);
         let unused_qual = {
             let word = rustc_ast::attr::mk_nested_word_item(Ident::new(
@@ -687,7 +696,7 @@ impl<'a> TraitDef<'a> {
             self.span,
             Ident::invalid(),
             a,
-            ast::ItemKind::Impl(box ast::ImplKind {
+            ast::ItemKind::Impl(Box::new(ast::ImplKind {
                 unsafety,
                 polarity: ast::ImplPolarity::Positive,
                 defaultness: ast::Defaultness::Final,
@@ -696,7 +705,7 @@ impl<'a> TraitDef<'a> {
                 of_trait: opt_trait_ref,
                 self_ty: self_type,
                 items: methods.into_iter().chain(associated_types).collect(),
-            }),
+            })),
         )
     }
 
@@ -929,7 +938,12 @@ impl<'a> MethodDef<'a> {
                 tokens: None,
             },
             ident: method_ident,
-            kind: ast::AssocItemKind::Fn(box ast::FnKind(def, sig, fn_generics, Some(body_block))),
+            kind: ast::AssocItemKind::Fn(Box::new(ast::FnKind(
+                def,
+                sig,
+                fn_generics,
+                Some(body_block),
+            ))),
             tokens: None,
         })
     }
@@ -1034,7 +1048,7 @@ impl<'a> MethodDef<'a> {
         // make a series of nested matches, to destructure the
         // structs. This is actually right-to-left, but it shouldn't
         // matter.
-        for (arg_expr, pat) in self_args.iter().zip(patterns) {
+        for (arg_expr, pat) in iter::zip(self_args, patterns) {
             body = cx.expr_match(
                 trait_.span,
                 arg_expr.clone(),
@@ -1351,7 +1365,7 @@ impl<'a> MethodDef<'a> {
             let mut discriminant_test = cx.expr_bool(sp, true);
 
             let mut first_ident = None;
-            for (&ident, self_arg) in vi_idents.iter().zip(&self_args) {
+            for (&ident, self_arg) in iter::zip(&vi_idents, &self_args) {
                 let self_addr = cx.expr_addr_of(sp, self_arg.clone());
                 let variant_value =
                     deriving::call_intrinsic(cx, sp, sym::discriminant_value, vec![self_addr]);
@@ -1571,14 +1585,12 @@ impl<'a> TraitDef<'a> {
         let subpats = self.create_subpatterns(cx, paths, mutbl, use_temporaries);
         let pattern = match *struct_def {
             VariantData::Struct(..) => {
-                let field_pats = subpats
-                    .into_iter()
-                    .zip(&ident_exprs)
+                let field_pats = iter::zip(subpats, &ident_exprs)
                     .map(|(pat, &(sp, ident, ..))| {
                         if ident.is_none() {
                             cx.span_bug(sp, "a braced struct with unnamed fields in `derive`");
                         }
-                        ast::FieldPat {
+                        ast::PatField {
                             ident: ident.unwrap(),
                             is_shorthand: false,
                             attrs: ast::AttrVec::new(),
@@ -1686,7 +1698,7 @@ where
 /// One or more fields: call the base case function on the first value (which depends on
 /// `use_fold`), and use that as the base case. Then perform `cs_fold` on the remainder of the
 /// fields.
-/// When the `substructure` is a `EnumNonMatchingCollapsed`, the result of `enum_nonmatch_f`
+/// When the `substructure` is an `EnumNonMatchingCollapsed`, the result of `enum_nonmatch_f`
 /// is returned. Statics may not be folded over.
 /// See `cs_op` in `partial_ord.rs` for a model example.
 pub fn cs_fold1<F, B>(

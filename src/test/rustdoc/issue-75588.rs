@@ -1,4 +1,3 @@
-// ignore-tidy-linelength
 // aux-build:realcore.rs
 // aux-build:real_gimli.rs
 
@@ -11,8 +10,8 @@ extern crate realcore;
 extern crate real_gimli;
 
 // issue #74672
-// @!has foo/trait.Deref.html '//*[@id="impl-Deref-for-EndianSlice"]//code' 'impl Deref for EndianSlice'
+// @!has foo/trait.Deref.html '//*[@id="impl-Deref-for-EndianSlice"]//h3[@class="code-header in-band"]' 'impl Deref for EndianSlice'
 pub use realcore::Deref;
 
-// @has foo/trait.Join.html '//*[@id="impl-Join-for-Foo"]//code' 'impl Join for Foo'
+// @has foo/trait.Join.html '//*[@id="impl-Join-for-Foo"]//h3[@class="code-header in-band"]' 'impl Join for Foo'
 pub use realcore::Join;

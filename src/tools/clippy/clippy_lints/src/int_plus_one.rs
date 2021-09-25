@@ -1,20 +1,20 @@
 //! lint on blocks unnecessarily using >= with a + 1 or - 1
 
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::source::snippet_opt;
 use rustc_ast::ast::{BinOpKind, Expr, ExprKind, Lit, LitKind};
 use rustc_errors::Applicability;
 use rustc_lint::{EarlyContext, EarlyLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
-use crate::utils::{snippet_opt, span_lint_and_sugg};
-
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `x >= y + 1` or `x - 1 >= y` (and `<=`) in a block
+    /// ### What it does
+    /// Checks for usage of `x >= y + 1` or `x - 1 >= y` (and `<=`) in a block
     ///
-    /// **Why is this bad?** Readability -- better to use `> y` instead of `>= y + 1`.
+    /// ### Why is this bad?
+    /// Readability -- better to use `> y` instead of `>= y + 1`.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let x = 1;
     /// # let y = 1;

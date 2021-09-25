@@ -198,7 +198,7 @@ impl Once {
     /// routine is currently running.
     ///
     /// When this function returns, it is guaranteed that some initialization
-    /// has run and completed (it may not be the closure specified). It is also
+    /// has run and completed (it might not be the closure specified). It is also
     /// guaranteed that any memory writes performed by the executed closure can
     /// be reliably observed by other threads at this point (there is a
     /// happens-before relation between the closure and code executing after the
@@ -471,7 +471,7 @@ fn wait(state_and_queue: &AtomicUsize, mut current_state: usize) {
             // If the managing thread happens to signal and unpark us before we
             // can park ourselves, the result could be this thread never gets
             // unparked. Luckily `park` comes with the guarantee that if it got
-            // an `unpark` just before on an unparked thread is does not park.
+            // an `unpark` just before on an unparked thread it does not park.
             thread::park();
         }
         break;
@@ -481,7 +481,7 @@ fn wait(state_and_queue: &AtomicUsize, mut current_state: usize) {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Once {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Once { .. }")
+        f.debug_struct("Once").finish_non_exhaustive()
     }
 }
 

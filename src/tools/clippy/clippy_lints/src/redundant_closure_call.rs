@@ -1,4 +1,5 @@
-use crate::utils::{snippet_with_applicability, span_lint, span_lint_and_then};
+use clippy_utils::diagnostics::{span_lint, span_lint_and_then};
+use clippy_utils::source::snippet_with_applicability;
 use if_chain::if_chain;
 use rustc_ast::ast;
 use rustc_ast::visit as ast_visit;
@@ -7,21 +8,21 @@ use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::intravisit as hir_visit;
 use rustc_hir::intravisit::Visitor as HirVisitor;
-use rustc_lint::{EarlyContext, EarlyLintPass, LateContext, LateLintPass, LintContext};
+use rustc_lint::{EarlyContext, EarlyLintPass, LateContext, LateLintPass};
 use rustc_middle::hir::map::Map;
 use rustc_middle::lint::in_external_macro;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Detects closures called in the same expression where they
+    /// ### What it does
+    /// Detects closures called in the same expression where they
     /// are defined.
     ///
-    /// **Why is this bad?** It is unnecessarily adding to the expression's
+    /// ### Why is this bad?
+    /// It is unnecessarily adding to the expression's
     /// complexity.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// // Bad
     /// let a = (|| 42)()
@@ -50,19 +51,17 @@ impl ReturnVisitor {
 
 impl<'ast> ast_visit::Visitor<'ast> for ReturnVisitor {
     fn visit_expr(&mut self, ex: &'ast ast::Expr) {
-        if let ast::ExprKind::Ret(_) = ex.kind {
-            self.found_return = true;
-        } else if let ast::ExprKind::Try(_) = ex.kind {
+        if let ast::ExprKind::Ret(_) | ast::ExprKind::Try(_) = ex.kind {
             self.found_return = true;
         }
 
-        ast_visit::walk_expr(self, ex)
+        ast_visit::walk_expr(self, ex);
     }
 }
 
 impl EarlyLintPass for RedundantClosureCall {
     fn check_expr(&mut self, cx: &EarlyContext<'_>, expr: &ast::Expr) {
-        if in_external_macro(cx.sess(), expr.span) {
+        if in_external_macro(cx.sess, expr.span) {
             return;
         }
         if_chain! {
@@ -110,10 +109,10 @@ impl<'tcx> LateLintPass<'tcx> for RedundantClosureCall {
 
                 fn visit_expr(&mut self, expr: &'tcx hir::Expr<'tcx>) {
                     if_chain! {
-                        if let hir::ExprKind::Call(ref closure, _) = expr.kind;
-                        if let hir::ExprKind::Path(hir::QPath::Resolved(_, ref path)) = closure.kind;
-                        if self.path.segments[0].ident == path.segments[0].ident
-                            && self.path.res == path.res;
+                        if let hir::ExprKind::Call(closure, _) = expr.kind;
+                        if let hir::ExprKind::Path(hir::QPath::Resolved(_, path)) = closure.kind;
+                        if self.path.segments[0].ident == path.segments[0].ident;
+                        if self.path.res == path.res;
                         then {
                             self.count += 1;
                         }
@@ -132,14 +131,14 @@ impl<'tcx> LateLintPass<'tcx> for RedundantClosureCall {
 
         for w in block.stmts.windows(2) {
             if_chain! {
-                if let hir::StmtKind::Local(ref local) = w[0].kind;
-                if let Option::Some(ref t) = local.init;
+                if let hir::StmtKind::Local(local) = w[0].kind;
+                if let Option::Some(t) = local.init;
                 if let hir::ExprKind::Closure(..) = t.kind;
                 if let hir::PatKind::Binding(_, _, ident, _) = local.pat.kind;
-                if let hir::StmtKind::Semi(ref second) = w[1].kind;
-                if let hir::ExprKind::Assign(_, ref call, _) = second.kind;
-                if let hir::ExprKind::Call(ref closure, _) = call.kind;
-                if let hir::ExprKind::Path(hir::QPath::Resolved(_, ref path)) = closure.kind;
+                if let hir::StmtKind::Semi(second) = w[1].kind;
+                if let hir::ExprKind::Assign(_, call, _) = second.kind;
+                if let hir::ExprKind::Call(closure, _) = call.kind;
+                if let hir::ExprKind::Path(hir::QPath::Resolved(_, path)) = closure.kind;
                 if ident == path.segments[0].ident;
                 if count_closure_usage(cx, block, path) == 1;
                 then {

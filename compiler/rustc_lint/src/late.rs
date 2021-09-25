@@ -16,9 +16,9 @@
 
 use crate::{passes::LateLintPassObject, LateContext, LateLintPass, LintStore};
 use rustc_ast as ast;
-use rustc_data_structures::sync::{join, par_iter, ParallelIterator};
+use rustc_data_structures::sync::join;
 use rustc_hir as hir;
-use rustc_hir::def_id::{LocalDefId, LOCAL_CRATE};
+use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit as hir_visit;
 use rustc_hir::intravisit::Visitor;
 use rustc_middle::hir::map::Map;
@@ -219,10 +219,10 @@ impl<'tcx, T: LateLintPass<'tcx>> hir_visit::Visitor<'tcx> for LateContextAndPas
         lint_callback!(self, check_struct_def_post, s);
     }
 
-    fn visit_struct_field(&mut self, s: &'tcx hir::StructField<'tcx>) {
+    fn visit_field_def(&mut self, s: &'tcx hir::FieldDef<'tcx>) {
         self.with_lint_attrs(s.hir_id, |cx| {
-            lint_callback!(cx, check_struct_field, s);
-            hir_visit::walk_struct_field(cx, s);
+            lint_callback!(cx, check_field_def, s);
+            hir_visit::walk_field_def(cx, s);
         })
     }
 
@@ -242,6 +242,11 @@ impl<'tcx, T: LateLintPass<'tcx>> hir_visit::Visitor<'tcx> for LateContextAndPas
     fn visit_ty(&mut self, t: &'tcx hir::Ty<'tcx>) {
         lint_callback!(self, check_ty, t);
         hir_visit::walk_ty(self, t);
+    }
+
+    fn visit_infer(&mut self, inf: &'tcx hir::InferArg) {
+        lint_callback!(self, check_infer, inf);
+        hir_visit::walk_inf(self, inf);
     }
 
     fn visit_name(&mut self, sp: Span, name: Symbol) {
@@ -375,7 +380,7 @@ fn late_lint_mod_pass<'tcx, T: LateLintPass<'tcx>>(
     module_def_id: LocalDefId,
     pass: T,
 ) {
-    let access_levels = &tcx.privacy_access_levels(LOCAL_CRATE);
+    let access_levels = &tcx.privacy_access_levels(());
 
     let context = LateContext {
         tcx,
@@ -423,7 +428,7 @@ pub fn late_lint_mod<'tcx, T: LateLintPass<'tcx>>(
 }
 
 fn late_lint_pass_crate<'tcx, T: LateLintPass<'tcx>>(tcx: TyCtxt<'tcx>, pass: T) {
-    let access_levels = &tcx.privacy_access_levels(LOCAL_CRATE);
+    let access_levels = &tcx.privacy_access_levels(());
 
     let krate = tcx.hir().krate();
 
@@ -446,9 +451,8 @@ fn late_lint_pass_crate<'tcx, T: LateLintPass<'tcx>>(tcx: TyCtxt<'tcx>, pass: T)
         // since the root module isn't visited as an item (because it isn't an
         // item), warn for it here.
         lint_callback!(cx, check_crate, krate);
-
-        hir_visit::walk_crate(cx, krate);
-
+        tcx.hir().walk_toplevel_module(cx);
+        tcx.hir().walk_attributes(cx);
         lint_callback!(cx, check_crate_post, krate);
     })
 }
@@ -497,9 +501,7 @@ pub fn check_crate<'tcx, T: LateLintPass<'tcx>>(
         || {
             tcx.sess.time("module_lints", || {
                 // Run per-module lints
-                par_iter(&tcx.hir().krate().modules).for_each(|(&module, _)| {
-                    tcx.ensure().lint_mod(module);
-                });
+                tcx.hir().par_for_each_module(|module| tcx.ensure().lint_mod(module));
             });
         },
     );

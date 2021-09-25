@@ -21,9 +21,7 @@ use rustc_infer::infer::{self, InferOk, TyCtxtInferExt};
 use rustc_middle::middle::stability;
 use rustc_middle::ty::subst::{InternalSubsts, Subst, SubstsRef};
 use rustc_middle::ty::GenericParamDefKind;
-use rustc_middle::ty::{
-    self, ParamEnvAnd, ToPolyTraitRef, ToPredicate, Ty, TyCtxt, TypeFoldable, WithConstness,
-};
+use rustc_middle::ty::{self, ParamEnvAnd, ToPredicate, Ty, TyCtxt, TypeFoldable, WithConstness};
 use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::lev_distance::{find_best_match_for_name, lev_distance};
@@ -83,6 +81,8 @@ struct ProbeContext<'a, 'tcx> {
     unsatisfied_predicates: Vec<(ty::Predicate<'tcx>, Option<ty::Predicate<'tcx>>)>,
 
     is_suggestion: IsSuggestion,
+
+    scope_expr_id: hir::HirId,
 }
 
 impl<'a, 'tcx> Deref for ProbeContext<'a, 'tcx> {
@@ -156,7 +156,7 @@ enum ProbeResult {
 
 /// When adjusting a receiver we often want to do one of
 ///
-/// - Add a `&` (or `&mut`), converting the recevier from `T` to `&T` (or `&mut T`)
+/// - Add a `&` (or `&mut`), converting the receiver from `T` to `&T` (or `&mut T`)
 /// - If the receiver has type `*mut T`, convert it to `*const T`
 ///
 /// This type tells us which one to do.
@@ -184,7 +184,7 @@ pub enum AutorefOrPtrAdjustment<'tcx> {
 impl<'tcx> AutorefOrPtrAdjustment<'tcx> {
     fn get_unsize(&self) -> Option<Ty<'tcx>> {
         match self {
-            AutorefOrPtrAdjustment::Autoref { mutbl: _, unsize } => unsize.clone(),
+            AutorefOrPtrAdjustment::Autoref { mutbl: _, unsize } => *unsize,
             AutorefOrPtrAdjustment::ToConstPtr => None,
         }
     }
@@ -448,6 +448,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 orig_values,
                 steps.steps,
                 is_suggestion,
+                scope_expr_id,
             );
 
             probe_cx.assemble_inherent_candidates();
@@ -547,6 +548,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         orig_steps_var_values: OriginalQueryValues<'tcx>,
         steps: Lrc<Vec<CandidateStep<'tcx>>>,
         is_suggestion: IsSuggestion,
+        scope_expr_id: hir::HirId,
     ) -> ProbeContext<'a, 'tcx> {
         ProbeContext {
             fcx,
@@ -564,6 +566,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             private_candidate: None,
             unsatisfied_predicates: Vec::new(),
             is_suggestion,
+            scope_expr_id,
         }
     }
 
@@ -611,32 +614,30 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         let lang_items = self.tcx.lang_items();
 
         match *self_ty.value.value.kind() {
-            ty::Dynamic(ref data, ..) => {
-                if let Some(p) = data.principal() {
-                    // Subtle: we can't use `instantiate_query_response` here: using it will
-                    // commit to all of the type equalities assumed by inference going through
-                    // autoderef (see the `method-probe-no-guessing` test).
-                    //
-                    // However, in this code, it is OK if we end up with an object type that is
-                    // "more general" than the object type that we are evaluating. For *every*
-                    // object type `MY_OBJECT`, a function call that goes through a trait-ref
-                    // of the form `<MY_OBJECT as SuperTraitOf(MY_OBJECT)>::func` is a valid
-                    // `ObjectCandidate`, and it should be discoverable "exactly" through one
-                    // of the iterations in the autoderef loop, so there is no problem with it
-                    // being discoverable in another one of these iterations.
-                    //
-                    // Using `instantiate_canonical_with_fresh_inference_vars` on our
-                    // `Canonical<QueryResponse<Ty<'tcx>>>` and then *throwing away* the
-                    // `CanonicalVarValues` will exactly give us such a generalization - it
-                    // will still match the original object type, but it won't pollute our
-                    // type variables in any form, so just do that!
-                    let (QueryResponse { value: generalized_self_ty, .. }, _ignored_var_values) =
-                        self.fcx
-                            .instantiate_canonical_with_fresh_inference_vars(self.span, &self_ty);
+            ty::Dynamic(ref data, ..) if let Some(p) = data.principal() => {
+                // Subtle: we can't use `instantiate_query_response` here: using it will
+                // commit to all of the type equalities assumed by inference going through
+                // autoderef (see the `method-probe-no-guessing` test).
+                //
+                // However, in this code, it is OK if we end up with an object type that is
+                // "more general" than the object type that we are evaluating. For *every*
+                // object type `MY_OBJECT`, a function call that goes through a trait-ref
+                // of the form `<MY_OBJECT as SuperTraitOf(MY_OBJECT)>::func` is a valid
+                // `ObjectCandidate`, and it should be discoverable "exactly" through one
+                // of the iterations in the autoderef loop, so there is no problem with it
+                // being discoverable in another one of these iterations.
+                //
+                // Using `instantiate_canonical_with_fresh_inference_vars` on our
+                // `Canonical<QueryResponse<Ty<'tcx>>>` and then *throwing away* the
+                // `CanonicalVarValues` will exactly give us such a generalization - it
+                // will still match the original object type, but it won't pollute our
+                // type variables in any form, so just do that!
+                let (QueryResponse { value: generalized_self_ty, .. }, _ignored_var_values) =
+                    self.fcx
+                        .instantiate_canonical_with_fresh_inference_vars(self.span, &self_ty);
 
-                    self.assemble_inherent_candidates_from_object(generalized_self_ty);
-                    self.assemble_inherent_impl_candidates_for_type(p.def_id());
-                }
+                self.assemble_inherent_candidates_from_object(generalized_self_ty);
+                self.assemble_inherent_impl_candidates_for_type(p.def_id());
             }
             ty::Adt(def, _) => {
                 self.assemble_inherent_impl_candidates_for_type(def.did);
@@ -663,7 +664,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
             ty::Slice(_) => {
-                for &lang_def_id in &[
+                for lang_def_id in [
                     lang_items.slice_impl(),
                     lang_items.slice_u8_impl(),
                     lang_items.slice_alloc_impl(),
@@ -742,15 +743,15 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
         debug!("assemble_inherent_impl_probe {:?}", impl_def_id);
 
-        let (impl_ty, impl_substs) = self.impl_ty_and_substs(impl_def_id);
-        let impl_ty = impl_ty.subst(self.tcx, impl_substs);
-
         for item in self.impl_or_trait_item(impl_def_id) {
             if !self.has_applicable_self(&item) {
                 // No receiver declared. Not a candidate.
                 self.record_static_candidate(ImplSource(impl_def_id));
                 continue;
             }
+
+            let (impl_ty, impl_substs) = self.impl_ty_and_substs(impl_def_id);
+            let impl_ty = impl_ty.subst(self.tcx, impl_substs);
 
             // Determine the receiver type that the method itself expects.
             let xform_tys = self.xform_self_ty(&item, impl_ty, impl_substs);
@@ -827,7 +828,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         let bounds = self.param_env.caller_bounds().iter().filter_map(|predicate| {
             let bound_predicate = predicate.kind();
             match bound_predicate.skip_binder() {
-                ty::PredicateKind::Trait(trait_predicate, _) => {
+                ty::PredicateKind::Trait(trait_predicate) => {
                     match *trait_predicate.trait_ref.self_ty().kind() {
                         ty::Param(p) if p == param_ty => {
                             Some(bound_predicate.rebind(trait_predicate.trait_ref))
@@ -836,6 +837,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                     }
                 }
                 ty::PredicateKind::Subtype(..)
+                | ty::PredicateKind::Coerce(..)
                 | ty::PredicateKind::Projection(..)
                 | ty::PredicateKind::RegionOutlives(..)
                 | ty::PredicateKind::WellFormed(..)
@@ -963,7 +965,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
         if self.tcx.is_trait_alias(trait_def_id) {
             // For trait aliases, assume all super-traits are relevant.
-            let bounds = iter::once(trait_ref.to_poly_trait_ref());
+            let bounds = iter::once(ty::Binder::dummy(trait_ref));
             self.elaborate_bounds(bounds, |this, new_trait_ref, item| {
                 let new_trait_ref = this.erase_late_bound_regions(new_trait_ref);
 
@@ -1281,7 +1283,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         if let Some(uc) = unstable_candidates {
             applicable_candidates.retain(|&(p, _)| {
                 if let stability::EvalResult::Deny { feature, .. } =
-                    self.tcx.eval_stability(p.item.def_id, None, self.span)
+                    self.tcx.eval_stability(p.item.def_id, None, self.span, None)
                 {
                     uc.push((p, feature));
                     return false;
@@ -1312,7 +1314,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
     ) {
         self.tcx.struct_span_lint_hir(
             lint::builtin::UNSTABLE_NAME_COLLISIONS,
-            self.fcx.body_id,
+            self.scope_expr_id,
             self.span,
             |lint| {
                 let def_kind = stable_pick.item.kind.as_def_kind();
@@ -1368,7 +1370,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         trait_ref: ty::TraitRef<'tcx>,
     ) -> traits::SelectionResult<'tcx, traits::Selection<'tcx>> {
         let cause = traits::ObligationCause::misc(self.span, self.body_id);
-        let predicate = trait_ref.to_poly_trait_ref().to_poly_trait_predicate();
+        let predicate = ty::Binder::dummy(trait_ref).to_poly_trait_predicate();
         let obligation = traits::Obligation::new(cause, self.param_env, predicate);
         traits::SelectionContext::new(self).select(&obligation)
     }
@@ -1456,7 +1458,18 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 }
 
                 TraitCandidate(trait_ref) => {
-                    let predicate = trait_ref.without_const().to_predicate(self.tcx);
+                    if let Some(method_name) = self.method_name {
+                        // Some trait methods are excluded for arrays before 2021.
+                        // (`array.into_iter()` wants a slice iterator for compatibility.)
+                        if self_ty.is_array() && !method_name.span.rust_2021() {
+                            let trait_def = self.tcx.trait_def(trait_ref.def_id);
+                            if trait_def.skip_array_during_method_dispatch {
+                                return ProbeResult::NoMatch;
+                            }
+                        }
+                    }
+                    let predicate =
+                        ty::Binder::dummy(trait_ref).without_const().to_predicate(self.tcx);
                     let obligation = traits::Obligation::new(cause, self.param_env, predicate);
                     if !self.predicate_may_hold(&obligation) {
                         result = ProbeResult::NoMatch;
@@ -1594,6 +1607,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 self.orig_steps_var_values.clone(),
                 steps,
                 IsSuggestion(true),
+                self.scope_expr_id,
             );
             pcx.allow_similar_names = true;
             pcx.assemble_inherent_candidates();
@@ -1700,7 +1714,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                             // In general, during probe we erase regions.
                             self.tcx.lifetimes.re_erased.into()
                         }
-                        GenericParamDefKind::Type { .. } | GenericParamDefKind::Const => {
+                        GenericParamDefKind::Type { .. } | GenericParamDefKind::Const { .. } => {
                             self.var_for_def(self.span, param)
                         }
                     }
@@ -1753,7 +1767,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
     ///    region got replaced with the same variable, which requires a bit more coordination
     ///    and/or tracking the substitution and
     ///    so forth.
-    fn erase_late_bound_regions<T>(&self, value: ty::Binder<T>) -> T
+    fn erase_late_bound_regions<T>(&self, value: ty::Binder<'tcx, T>) -> T
     where
         T: TypeFoldable<'tcx>,
     {
@@ -1762,7 +1776,9 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
     /// Finds the method with the appropriate name (or return type, as the case may be). If
     /// `allow_similar_names` is set, find methods with close-matching names.
-    fn impl_or_trait_item(&self, def_id: DefId) -> Vec<ty::AssocItem> {
+    // The length of the returned iterator is nearly always 0 or 1 and this
+    // method is fairly hot.
+    fn impl_or_trait_item(&self, def_id: DefId) -> SmallVec<[ty::AssocItem; 1]> {
         if let Some(name) = self.method_name {
             if self.allow_similar_names {
                 let max_dist = max(name.as_str().len(), 3) / 3;
@@ -1778,7 +1794,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             } else {
                 self.fcx
                     .associated_item(def_id, name, Namespace::ValueNS)
-                    .map_or_else(Vec::new, |x| vec![x])
+                    .map_or_else(SmallVec::new, |x| SmallVec::from_buf([x]))
             }
         } else {
             self.tcx.associated_items(def_id).in_definition_order().copied().collect()

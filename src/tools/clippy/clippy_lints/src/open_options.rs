@@ -1,4 +1,6 @@
-use crate::utils::{match_type, paths, span_lint};
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::paths;
+use clippy_utils::ty::match_type;
 use rustc_ast::ast::LitKind;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
@@ -6,15 +8,15 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::{Span, Spanned};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for duplicate open options as well as combinations
+    /// ### What it does
+    /// Checks for duplicate open options as well as combinations
     /// that make no sense.
     ///
-    /// **Why is this bad?** In the best case, the code will be harder to read than
+    /// ### Why is this bad?
+    /// In the best case, the code will be harder to read than
     /// necessary. I don't know the worst case.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// use std::fs::OpenOptions;
     ///
@@ -29,11 +31,11 @@ declare_lint_pass!(OpenOptions => [NONSENSICAL_OPEN_OPTIONS]);
 
 impl<'tcx> LateLintPass<'tcx> for OpenOptions {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
-        if let ExprKind::MethodCall(ref path, _, ref arguments, _) = e.kind {
-            let obj_ty = cx.typeck_results().expr_ty(&arguments[0]).peel_refs();
+        if let ExprKind::MethodCall(path, _, [self_arg, ..], _) = &e.kind {
+            let obj_ty = cx.typeck_results().expr_ty(self_arg).peel_refs();
             if path.ident.name == sym!(open) && match_type(cx, obj_ty, &paths::OPEN_OPTIONS) {
                 let mut options = Vec::new();
-                get_open_options(cx, &arguments[0], &mut options);
+                get_open_options(cx, self_arg, &mut options);
                 check_open_options(cx, &options, e.span);
             }
         }
@@ -57,7 +59,7 @@ enum OpenOption {
 }
 
 fn get_open_options(cx: &LateContext<'_>, argument: &Expr<'_>, options: &mut Vec<(OpenOption, Argument)>) {
-    if let ExprKind::MethodCall(ref path, _, ref arguments, _) = argument.kind {
+    if let ExprKind::MethodCall(path, _, arguments, _) = argument.kind {
         let obj_ty = cx.typeck_results().expr_ty(&arguments[0]).peel_refs();
 
         // Only proceed if this is a call on some object of type std::fs::OpenOptions
@@ -121,7 +123,7 @@ fn check_open_options(cx: &LateContext<'_>, options: &[(OpenOption, Argument)], 
                         "the method `create` is called more than once",
                     );
                 } else {
-                    create = true
+                    create = true;
                 }
                 create_arg = create_arg || (arg == Argument::True);
             },
@@ -134,7 +136,7 @@ fn check_open_options(cx: &LateContext<'_>, options: &[(OpenOption, Argument)], 
                         "the method `append` is called more than once",
                     );
                 } else {
-                    append = true
+                    append = true;
                 }
                 append_arg = append_arg || (arg == Argument::True);
             },
@@ -147,7 +149,7 @@ fn check_open_options(cx: &LateContext<'_>, options: &[(OpenOption, Argument)], 
                         "the method `truncate` is called more than once",
                     );
                 } else {
-                    truncate = true
+                    truncate = true;
                 }
                 truncate_arg = truncate_arg || (arg == Argument::True);
             },
@@ -160,7 +162,7 @@ fn check_open_options(cx: &LateContext<'_>, options: &[(OpenOption, Argument)], 
                         "the method `read` is called more than once",
                     );
                 } else {
-                    read = true
+                    read = true;
                 }
                 read_arg = read_arg || (arg == Argument::True);
             },
@@ -173,7 +175,7 @@ fn check_open_options(cx: &LateContext<'_>, options: &[(OpenOption, Argument)], 
                         "the method `write` is called more than once",
                     );
                 } else {
-                    write = true
+                    write = true;
                 }
                 write_arg = write_arg || (arg == Argument::True);
             },

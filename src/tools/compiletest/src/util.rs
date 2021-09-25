@@ -48,10 +48,13 @@ const ARCH_TABLE: &[(&str, &str)] = &[
     ("armv7s", "arm"),
     ("asmjs", "asmjs"),
     ("avr", "avr"),
+    ("bpfeb", "bpf"),
+    ("bpfel", "bpf"),
     ("hexagon", "hexagon"),
     ("i386", "x86"),
     ("i586", "x86"),
     ("i686", "x86"),
+    ("m68k", "m68k"),
     ("mips", "mips"),
     ("mips64", "mips64"),
     ("mips64el", "mips64"),
@@ -93,7 +96,8 @@ pub const ASAN_SUPPORTED_TARGETS: &[&str] = &[
 ];
 
 pub const LSAN_SUPPORTED_TARGETS: &[&str] = &[
-    "aarch64-apple-darwin",
+    // FIXME: currently broken, see #88132
+    // "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
@@ -127,6 +131,15 @@ const BIG_ENDIAN: &[&str] = &[
     "sparc64",
     "sparcv9",
 ];
+
+static ASM_SUPPORTED_ARCHS: &[&str] = &[
+    "x86", "x86_64", "arm", "aarch64", "riscv32", "riscv64", "nvptx64", "hexagon", "mips",
+    "mips64", "spirv", "wasm32",
+];
+
+pub fn has_asm_support(triple: &str) -> bool {
+    ASM_SUPPORTED_ARCHS.contains(&get_arch(triple))
+}
 
 pub fn matches_os(triple: &str, name: &str) -> bool {
     // For the wasm32 bare target we ignore anything also ignored on emscripten

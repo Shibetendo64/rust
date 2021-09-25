@@ -1,4 +1,6 @@
-use crate::utils::{contains_name, higher, iter_input_pats, snippet, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::source::snippet;
+use clippy_utils::{contains_name, higher, iter_input_pats};
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
     Block, Body, Expr, ExprKind, FnDecl, Guard, HirId, Local, MutTy, Pat, PatKind, Path, QPath, StmtKind, Ty, TyKind,
@@ -12,17 +14,20 @@ use rustc_span::source_map::Span;
 use rustc_span::symbol::Symbol;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for bindings that shadow other bindings already in
+    /// ### What it does
+    /// Checks for bindings that shadow other bindings already in
     /// scope, while just changing reference level or mutability.
     ///
-    /// **Why is this bad?** Not much, in fact it's a very common pattern in Rust
+    /// ### Why is this bad?
+    /// Not much, in fact it's a very common pattern in Rust
     /// code. Still, some may opt to avoid it in their code base, they can set this
     /// lint to `Warn`.
     ///
-    /// **Known problems:** This lint, as the other shadowing related lints,
+    /// ### Known problems
+    /// This lint, as the other shadowing related lints,
     /// currently only catches very simple patterns.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let x = 1;
     /// // Bad
@@ -37,18 +42,21 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for bindings that shadow other bindings already in
+    /// ### What it does
+    /// Checks for bindings that shadow other bindings already in
     /// scope, while reusing the original value.
     ///
-    /// **Why is this bad?** Not too much, in fact it's a common pattern in Rust
+    /// ### Why is this bad?
+    /// Not too much, in fact it's a common pattern in Rust
     /// code. Still, some argue that name shadowing like this hurts readability,
     /// because a value may be bound to different things depending on position in
     /// the code.
     ///
-    /// **Known problems:** This lint, as the other shadowing related lints,
+    /// ### Known problems
+    /// This lint, as the other shadowing related lints,
     /// currently only catches very simple patterns.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let x = 2;
     /// let x = x + 1;
@@ -64,21 +72,24 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for bindings that shadow other bindings already in
-    /// scope, either without a initialization or with one that does not even use
+    /// ### What it does
+    /// Checks for bindings that shadow other bindings already in
+    /// scope, either without an initialization or with one that does not even use
     /// the original value.
     ///
-    /// **Why is this bad?** Name shadowing can hurt readability, especially in
+    /// ### Why is this bad?
+    /// Name shadowing can hurt readability, especially in
     /// large code bases, because it is easy to lose track of the active binding at
     /// any place in the code. This can be alleviated by either giving more specific
     /// names to bindings or introducing more scopes to contain the bindings.
     ///
-    /// **Known problems:** This lint, as the other shadowing related lints,
+    /// ### Known problems
+    /// This lint, as the other shadowing related lints,
     /// currently only catches very simple patterns. Note that
     /// `allow`/`warn`/`deny`/`forbid` attributes only work on the function level
     /// for this lint.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let y = 1;
     /// # let z = 2;
@@ -118,7 +129,7 @@ fn check_fn<'tcx>(cx: &LateContext<'tcx>, decl: &'tcx FnDecl<'_>, body: &'tcx Bo
     let mut bindings = Vec::with_capacity(decl.inputs.len());
     for arg in iter_input_pats(decl, body) {
         if let PatKind::Binding(.., ident, _) = arg.pat.kind {
-            bindings.push((ident.name, ident.span))
+            bindings.push((ident.name, ident.span));
         }
     }
     check_expr(cx, &body.value, &mut bindings);
@@ -128,12 +139,12 @@ fn check_block<'tcx>(cx: &LateContext<'tcx>, block: &'tcx Block<'_>, bindings: &
     let len = bindings.len();
     for stmt in block.stmts {
         match stmt.kind {
-            StmtKind::Local(ref local) => check_local(cx, local, bindings),
-            StmtKind::Expr(ref e) | StmtKind::Semi(ref e) => check_expr(cx, e, bindings),
+            StmtKind::Local(local) => check_local(cx, local, bindings),
+            StmtKind::Expr(e) | StmtKind::Semi(e) => check_expr(cx, e, bindings),
             StmtKind::Item(..) => {},
         }
     }
-    if let Some(ref o) = block.expr {
+    if let Some(o) = block.expr {
         check_expr(cx, o, bindings);
     }
     bindings.truncate(len);
@@ -147,16 +158,16 @@ fn check_local<'tcx>(cx: &LateContext<'tcx>, local: &'tcx Local<'_>, bindings: &
         return;
     }
     let Local {
-        ref pat,
+        pat,
         ref ty,
         ref init,
         span,
         ..
     } = *local;
-    if let Some(ref t) = *ty {
-        check_ty(cx, t, bindings)
+    if let Some(t) = *ty {
+        check_ty(cx, t, bindings);
     }
-    if let Some(ref o) = *init {
+    if let Some(o) = *init {
         check_expr(cx, o, bindings);
         check_pat(cx, pat, Some(o), span, bindings);
     } else {
@@ -194,34 +205,34 @@ fn check_pat<'tcx>(
                     bindings.push((name, ident.span));
                 }
             }
-            if let Some(ref p) = *inner {
+            if let Some(p) = *inner {
                 check_pat(cx, p, init, span, bindings);
             }
         },
         PatKind::Struct(_, pfields, _) => {
             if let Some(init_struct) = init {
-                if let ExprKind::Struct(_, ref efields, _) = init_struct.kind {
+                if let ExprKind::Struct(_, efields, _) = init_struct.kind {
                     for field in pfields {
                         let name = field.ident.name;
                         let efield = efields
                             .iter()
                             .find_map(|f| if f.ident.name == name { Some(&*f.expr) } else { None });
-                        check_pat(cx, &field.pat, efield, span, bindings);
+                        check_pat(cx, field.pat, efield, span, bindings);
                     }
                 } else {
                     for field in pfields {
-                        check_pat(cx, &field.pat, init, span, bindings);
+                        check_pat(cx, field.pat, init, span, bindings);
                     }
                 }
             } else {
                 for field in pfields {
-                    check_pat(cx, &field.pat, None, span, bindings);
+                    check_pat(cx, field.pat, None, span, bindings);
                 }
             }
         },
         PatKind::Tuple(inner, _) => {
             if let Some(init_tup) = init {
-                if let ExprKind::Tup(ref tup) = init_tup.kind {
+                if let ExprKind::Tup(tup) = init_tup.kind {
                     for (i, p) in inner.iter().enumerate() {
                         check_pat(cx, p, Some(&tup[i]), p.span, bindings);
                     }
@@ -236,10 +247,10 @@ fn check_pat<'tcx>(
                 }
             }
         },
-        PatKind::Box(ref inner) => {
+        PatKind::Box(inner) => {
             if let Some(initp) = init {
-                if let ExprKind::Box(ref inner_init) = initp.kind {
-                    check_pat(cx, inner, Some(&**inner_init), span, bindings);
+                if let ExprKind::Box(inner_init) = initp.kind {
+                    check_pat(cx, inner, Some(inner_init), span, bindings);
                 } else {
                     check_pat(cx, inner, init, span, bindings);
                 }
@@ -247,7 +258,7 @@ fn check_pat<'tcx>(
                 check_pat(cx, inner, init, span, bindings);
             }
         },
-        PatKind::Ref(ref inner, _) => check_pat(cx, inner, init, span, bindings),
+        PatKind::Ref(inner, _) => check_pat(cx, inner, init, span, bindings),
         // PatVec(Vec<P<Pat>>, Option<P<Pat>>, Vec<P<Pat>>),
         _ => (),
     }
@@ -321,30 +332,29 @@ fn check_expr<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, bindings: &mut
         return;
     }
     match expr.kind {
-        ExprKind::Unary(_, ref e)
-        | ExprKind::Field(ref e, _)
-        | ExprKind::AddrOf(_, _, ref e)
-        | ExprKind::Box(ref e) => check_expr(cx, e, bindings),
-        ExprKind::Block(ref block, _) | ExprKind::Loop(ref block, ..) => check_block(cx, block, bindings),
+        ExprKind::Unary(_, e) | ExprKind::Field(e, _) | ExprKind::AddrOf(_, _, e) | ExprKind::Box(e) => {
+            check_expr(cx, e, bindings);
+        },
+        ExprKind::Block(block, _) | ExprKind::Loop(block, ..) => check_block(cx, block, bindings),
         // ExprKind::Call
         // ExprKind::MethodCall
         ExprKind::Array(v) | ExprKind::Tup(v) => {
             for e in v {
-                check_expr(cx, e, bindings)
+                check_expr(cx, e, bindings);
             }
         },
-        ExprKind::If(ref cond, ref then, ref otherwise) => {
+        ExprKind::If(cond, then, ref otherwise) => {
             check_expr(cx, cond, bindings);
-            check_expr(cx, &**then, bindings);
-            if let Some(ref o) = *otherwise {
+            check_expr(cx, then, bindings);
+            if let Some(o) = *otherwise {
                 check_expr(cx, o, bindings);
             }
         },
-        ExprKind::Match(ref init, arms, _) => {
+        ExprKind::Match(init, arms, _) => {
             check_expr(cx, init, bindings);
             let len = bindings.len();
             for arm in arms {
-                check_pat(cx, &arm.pat, Some(&**init), arm.pat.span, bindings);
+                check_pat(cx, arm.pat, Some(init), arm.pat.span, bindings);
                 // This is ugly, but needed to get the right type
                 if let Some(ref guard) = arm.guard {
                     match guard {
@@ -355,7 +365,7 @@ fn check_expr<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, bindings: &mut
                         },
                     }
                 }
-                check_expr(cx, &arm.body, bindings);
+                check_expr(cx, arm.body, bindings);
                 bindings.truncate(len);
             }
         },
@@ -365,17 +375,15 @@ fn check_expr<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, bindings: &mut
 
 fn check_ty<'tcx>(cx: &LateContext<'tcx>, ty: &'tcx Ty<'_>, bindings: &mut Vec<(Symbol, Span)>) {
     match ty.kind {
-        TyKind::Slice(ref sty) => check_ty(cx, sty, bindings),
-        TyKind::Array(ref fty, ref anon_const) => {
+        TyKind::Slice(sty) => check_ty(cx, sty, bindings),
+        TyKind::Array(fty, ref anon_const) => {
             check_ty(cx, fty, bindings);
             check_expr(cx, &cx.tcx.hir().body(anon_const.body).value, bindings);
         },
-        TyKind::Ptr(MutTy { ty: ref mty, .. }) | TyKind::Rptr(_, MutTy { ty: ref mty, .. }) => {
-            check_ty(cx, mty, bindings)
-        },
+        TyKind::Ptr(MutTy { ty: mty, .. }) | TyKind::Rptr(_, MutTy { ty: mty, .. }) => check_ty(cx, mty, bindings),
         TyKind::Tup(tup) => {
             for t in tup {
-                check_ty(cx, t, bindings)
+                check_ty(cx, t, bindings);
             }
         },
         TyKind::Typeof(ref anon_const) => check_expr(cx, &cx.tcx.hir().body(anon_const.body).value, bindings),
@@ -385,12 +393,12 @@ fn check_ty<'tcx>(cx: &LateContext<'tcx>, ty: &'tcx Ty<'_>, bindings: &mut Vec<(
 
 fn is_self_shadow(name: Symbol, expr: &Expr<'_>) -> bool {
     match expr.kind {
-        ExprKind::Box(ref inner) | ExprKind::AddrOf(_, _, ref inner) => is_self_shadow(name, inner),
-        ExprKind::Block(ref block, _) => {
+        ExprKind::Box(inner) | ExprKind::AddrOf(_, _, inner) => is_self_shadow(name, inner),
+        ExprKind::Block(block, _) => {
             block.stmts.is_empty() && block.expr.as_ref().map_or(false, |e| is_self_shadow(name, e))
         },
-        ExprKind::Unary(op, ref inner) => (UnOp::Deref == op) && is_self_shadow(name, inner),
-        ExprKind::Path(QPath::Resolved(_, ref path)) => path_eq_name(name, path),
+        ExprKind::Unary(op, inner) => (UnOp::Deref == op) && is_self_shadow(name, inner),
+        ExprKind::Path(QPath::Resolved(_, path)) => path_eq_name(name, path),
         _ => false,
     }
 }

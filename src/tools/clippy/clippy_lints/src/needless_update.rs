@@ -1,22 +1,22 @@
-use crate::utils::span_lint;
+use clippy_utils::diagnostics::span_lint;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for needlessly including a base struct on update
+    /// ### What it does
+    /// Checks for needlessly including a base struct on update
     /// when all fields are changed anyway.
     ///
     /// This lint is not applied to structs marked with
     /// [non_exhaustive](https://doc.rust-lang.org/reference/attributes/type_system.html).
     ///
-    /// **Why is this bad?** This will cost resources (because the base has to be
+    /// ### Why is this bad?
+    /// This will cost resources (because the base has to be
     /// somewhere), and make the code less readable.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # struct Point {
     /// #     x: i32,
@@ -49,7 +49,7 @@ declare_lint_pass!(NeedlessUpdate => [NEEDLESS_UPDATE]);
 
 impl<'tcx> LateLintPass<'tcx> for NeedlessUpdate {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if let ExprKind::Struct(_, ref fields, Some(ref base)) = expr.kind {
+        if let ExprKind::Struct(_, fields, Some(base)) = expr.kind {
             let ty = cx.typeck_results().expr_ty(expr);
             if let ty::Adt(def, _) = ty.kind() {
                 if fields.len() == def.non_enum_variant().fields.len()

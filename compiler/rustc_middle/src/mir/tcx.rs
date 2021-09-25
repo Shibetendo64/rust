@@ -196,7 +196,7 @@ impl<'tcx> Rvalue<'tcx> {
             Rvalue::UnaryOp(UnOp::Not | UnOp::Neg, ref operand) => operand.ty(local_decls, tcx),
             Rvalue::Discriminant(ref place) => place.ty(local_decls, tcx).ty.discriminant_ty(tcx),
             Rvalue::NullaryOp(NullOp::Box, t) => tcx.mk_box(t),
-            Rvalue::NullaryOp(NullOp::SizeOf, _) => tcx.types.usize,
+            Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf, _) => tcx.types.usize,
             Rvalue::Aggregate(ref ak, ref ops) => match **ak {
                 AggregateKind::Array(ty) => tcx.mk_array(ty, ops.len() as u64),
                 AggregateKind::Tuple => tcx.mk_tup(ops.iter().map(|op| op.ty(local_decls, tcx))),
@@ -227,7 +227,7 @@ impl<'tcx> Operand<'tcx> {
     {
         match self {
             &Operand::Copy(ref l) | &Operand::Move(ref l) => l.ty(local_decls, tcx).ty,
-            &Operand::Constant(ref c) => c.literal.ty,
+            &Operand::Constant(ref c) => c.literal.ty(),
         }
     }
 }
@@ -265,7 +265,7 @@ impl BorrowKind {
             BorrowKind::Shared => hir::Mutability::Not,
 
             // We have no type corresponding to a unique imm borrow, so
-            // use `&mut`. It gives all the capabilities of an `&uniq`
+            // use `&mut`. It gives all the capabilities of a `&uniq`
             // and hence is a safe "over approximation".
             BorrowKind::Unique => hir::Mutability::Mut,
 

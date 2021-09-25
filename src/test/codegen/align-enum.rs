@@ -1,5 +1,5 @@
 // compile-flags: -C no-prepopulate-passes -Z mir-opt-level=0
-// ignore-tidy-linelength
+//
 
 #![crate_type = "lib"]
 
@@ -8,7 +8,7 @@ pub enum Align64 {
     A(u32),
     B(u32),
 }
-// CHECK: %Align64 = type { [0 x i32], i32, [15 x i32] }
+// CHECK: %Align64 = type { i32, [15 x i32] }
 
 pub struct Nested64 {
     a: u8,

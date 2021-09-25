@@ -12,11 +12,11 @@
 //! sort of test: for example, testing which variant an enum is, or
 //! testing a value against a constant.
 
+use crate::build::expr::as_place::PlaceBuilder;
 use crate::build::matches::{Ascription, Binding, Candidate, MatchPair};
 use crate::build::Builder;
-use crate::thir::{self, *};
 use rustc_hir::RangeEnd;
-use rustc_middle::mir::Place;
+use rustc_middle::thir::{self, *};
 use rustc_middle::ty;
 use rustc_middle::ty::layout::IntegerExt;
 use rustc_target::abi::{Integer, Size};
@@ -68,11 +68,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             let match_pairs = mem::take(&mut candidate.match_pairs);
 
             if let [MatchPair { pattern: Pat { kind: box PatKind::Or { pats }, .. }, place }] =
-                *match_pairs
+                &*match_pairs
             {
                 existing_bindings.extend_from_slice(&new_bindings);
                 mem::swap(&mut candidate.bindings, &mut existing_bindings);
-                candidate.subcandidates = self.create_or_subcandidates(candidate, place, pats);
+                candidate.subcandidates =
+                    self.create_or_subcandidates(candidate, place.clone(), pats);
                 return true;
             }
 
@@ -125,12 +126,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     fn create_or_subcandidates<'pat>(
         &mut self,
         candidate: &Candidate<'pat, 'tcx>,
-        place: Place<'tcx>,
+        place: PlaceBuilder<'tcx>,
         pats: &'pat [Pat<'tcx>],
     ) -> Vec<Candidate<'pat, 'tcx>> {
         pats.iter()
             .map(|pat| {
-                let mut candidate = Candidate::new(place, pat, candidate.has_guard);
+                let mut candidate = Candidate::new(place.clone(), pat, candidate.has_guard);
                 self.simplify_candidate(&mut candidate);
                 candidate
             })
@@ -151,16 +152,19 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         match *match_pair.pattern.kind {
             PatKind::AscribeUserType {
                 ref subpattern,
-                ascription: thir::pattern::Ascription { variance, user_ty, user_ty_span },
+                ascription: thir::Ascription { variance, user_ty, user_ty_span },
             } => {
                 // Apply the type ascription to the value at `match_pair.place`, which is the
-                // value being matched, taking the variance field into account.
-                candidate.ascriptions.push(Ascription {
-                    span: user_ty_span,
-                    user_ty,
-                    source: match_pair.place,
-                    variance,
-                });
+                if let Ok(place_resolved) =
+                    match_pair.place.clone().try_upvars_resolved(self.tcx, self.typeck_results)
+                {
+                    candidate.ascriptions.push(Ascription {
+                        span: user_ty_span,
+                        user_ty,
+                        source: place_resolved.into_place(self.tcx, self.typeck_results),
+                        variance,
+                    });
+                }
 
                 candidate.match_pairs.push(MatchPair::new(match_pair.place, subpattern));
 
@@ -172,16 +176,25 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Ok(())
             }
 
-            PatKind::Binding { name, mutability, mode, var, ty, ref subpattern, is_primary: _ } => {
-                candidate.bindings.push(Binding {
-                    name,
-                    mutability,
-                    span: match_pair.pattern.span,
-                    source: match_pair.place,
-                    var_id: var,
-                    var_ty: ty,
-                    binding_mode: mode,
-                });
+            PatKind::Binding {
+                name: _,
+                mutability: _,
+                mode,
+                var,
+                ty: _,
+                ref subpattern,
+                is_primary: _,
+            } => {
+                if let Ok(place_resolved) =
+                    match_pair.place.clone().try_upvars_resolved(self.tcx, self.typeck_results)
+                {
+                    candidate.bindings.push(Binding {
+                        span: match_pair.pattern.span,
+                        source: place_resolved.into_place(self.tcx, self.typeck_results),
+                        var_id: var,
+                        binding_mode: mode,
+                    });
+                }
 
                 if let Some(subpattern) = subpattern.as_ref() {
                     // this is the `x @ P` case; have to keep matching against `P` now
@@ -264,8 +277,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 }) && (adt_def.did.is_local()
                     || !adt_def.is_variant_list_non_exhaustive());
                 if irrefutable {
-                    let place = tcx.mk_place_downcast(match_pair.place, adt_def, variant_index);
-                    candidate.match_pairs.extend(self.field_match_pairs(place, subpatterns));
+                    let place_builder = match_pair.place.downcast(adt_def, variant_index);
+                    candidate
+                        .match_pairs
+                        .extend(self.field_match_pairs(place_builder, subpatterns));
                     Ok(())
                 } else {
                     Err(match_pair)
@@ -290,8 +305,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
 
             PatKind::Deref { ref subpattern } => {
-                let place = tcx.mk_place_deref(match_pair.place);
-                candidate.match_pairs.push(MatchPair::new(place, subpattern));
+                let place_builder = match_pair.place.deref();
+                candidate.match_pairs.push(MatchPair::new(place_builder, subpattern));
                 Ok(())
             }
 

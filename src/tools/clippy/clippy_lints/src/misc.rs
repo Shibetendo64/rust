@@ -1,3 +1,6 @@
+use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg, span_lint_and_then, span_lint_hir_and_then};
+use clippy_utils::source::{snippet, snippet_opt};
+use clippy_utils::ty::implements_trait;
 use if_chain::if_chain;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
@@ -14,19 +17,20 @@ use rustc_span::hygiene::DesugaringKind;
 use rustc_span::source_map::{ExpnKind, Span};
 use rustc_span::symbol::sym;
 
-use crate::consts::{constant, Constant};
-use crate::utils::sugg::Sugg;
-use crate::utils::{
-    get_item_name, get_parent_expr, higher, implements_trait, in_constant, is_diagnostic_assoc_item, is_integer_const,
-    iter_input_pats, last_path_segment, match_qpath, snippet, snippet_opt, span_lint, span_lint_and_sugg,
-    span_lint_and_then, span_lint_hir_and_then, unsext, SpanlessEq,
+use clippy_utils::consts::{constant, Constant};
+use clippy_utils::sugg::Sugg;
+use clippy_utils::{
+    expr_path_res, get_item_name, get_parent_expr, higher, in_constant, is_diag_trait_item, is_integer_const,
+    iter_input_pats, last_path_segment, match_any_def_paths, paths, unsext, SpanlessEq,
 };
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for function arguments and let bindings denoted as
+    /// ### What it does
+    /// Checks for function arguments and let bindings denoted as
     /// `ref`.
     ///
-    /// **Why is this bad?** The `ref` declaration makes the function take an owned
+    /// ### Why is this bad?
+    /// The `ref` declaration makes the function take an owned
     /// value, but turns the argument into a reference (which means that the value
     /// is destroyed when exiting the function). This adds not much value: either
     /// take a reference type, or take an owned value and create references in the
@@ -35,11 +39,12 @@ declare_clippy_lint! {
     /// For let bindings, `let x = &foo;` is preferred over `let ref x = foo`. The
     /// type of `x` is more obvious with the former.
     ///
-    /// **Known problems:** If the argument is dereferenced within the function,
+    /// ### Known problems
+    /// If the argument is dereferenced within the function,
     /// removing the `ref` will lead to errors. This can be fixed by removing the
     /// dereferences, e.g., changing `*x` to `x` within the function.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// // Bad
     /// fn foo(ref x: u8) -> bool {
@@ -57,14 +62,14 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for comparisons to NaN.
+    /// ### What it does
+    /// Checks for comparisons to NaN.
     ///
-    /// **Why is this bad?** NaN does not compare meaningfully to anything – not
+    /// ### Why is this bad?
+    /// NaN does not compare meaningfully to anything – not
     /// even itself – so those comparisons are simply wrong.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let x = 1.0;
     ///
@@ -80,18 +85,18 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for (in-)equality comparisons on floating-point
+    /// ### What it does
+    /// Checks for (in-)equality comparisons on floating-point
     /// values (apart from zero), except in functions called `*eq*` (which probably
     /// implement equality for a type involving floats).
     ///
-    /// **Why is this bad?** Floating point calculations are usually imprecise, so
+    /// ### Why is this bad?
+    /// Floating point calculations are usually imprecise, so
     /// asking if two values are *exactly* equal is asking for trouble. For a good
     /// guide on what to do, see [the floating point
     /// guide](http://www.floating-point-gui.de/errors/comparison).
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let x = 1.2331f64;
     /// let y = 1.2332f64;
@@ -113,16 +118,16 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for conversions to owned values just for the sake
+    /// ### What it does
+    /// Checks for conversions to owned values just for the sake
     /// of a comparison.
     ///
-    /// **Why is this bad?** The comparison can operate on a reference, so creating
+    /// ### Why is this bad?
+    /// The comparison can operate on a reference, so creating
     /// an owned value effectively throws it away directly afterwards, which is
     /// needlessly consuming code and heap space.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let x = "foo";
     /// # let y = String::from("foo");
@@ -140,18 +145,18 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for getting the remainder of a division by one or minus
+    /// ### What it does
+    /// Checks for getting the remainder of a division by one or minus
     /// one.
     ///
-    /// **Why is this bad?** The result for a divisor of one can only ever be zero; for
+    /// ### Why is this bad?
+    /// The result for a divisor of one can only ever be zero; for
     /// minus one it can cause panic/overflow (if the left operand is the minimal value of
     /// the respective integer type) or results in zero. No one will write such code
     /// deliberately, unless trying to win an Underhanded Rust Contest. Even for that
     /// contest, it's probably a bad idea. Use something more underhanded.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let x = 1;
     /// let a = x % 1;
@@ -163,17 +168,20 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for the use of bindings with a single leading
+    /// ### What it does
+    /// Checks for the use of bindings with a single leading
     /// underscore.
     ///
-    /// **Why is this bad?** A single leading underscore is usually used to indicate
+    /// ### Why is this bad?
+    /// A single leading underscore is usually used to indicate
     /// that a binding will not be used. Using such a binding breaks this
     /// expectation.
     ///
-    /// **Known problems:** The lint does not work properly with desugaring and
+    /// ### Known problems
+    /// The lint does not work properly with desugaring and
     /// macro, it has been allowed in the mean time.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let _x = 0;
     /// let y = _x + 1; // Here we are using `_x`, even though it has a leading
@@ -185,17 +193,17 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for the use of short circuit boolean conditions as
+    /// ### What it does
+    /// Checks for the use of short circuit boolean conditions as
     /// a
     /// statement.
     ///
-    /// **Why is this bad?** Using a short circuit boolean condition as a statement
+    /// ### Why is this bad?
+    /// Using a short circuit boolean condition as a statement
     /// may hide the fact that the second part is executed or not depending on the
     /// outcome of the first part.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust,ignore
     /// f() && g(); // We should write `if f() { g(); }`.
     /// ```
@@ -205,15 +213,14 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Catch casts from `0` to some pointer type
+    /// ### What it does
+    /// Catch casts from `0` to some pointer type
     ///
-    /// **Why is this bad?** This generally means `null` and is better expressed as
+    /// ### Why is this bad?
+    /// This generally means `null` and is better expressed as
     /// {`std`, `core`}`::ptr::`{`null`, `null_mut`}.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// // Bad
     /// let a = 0 as *const u32;
@@ -227,18 +234,18 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for (in-)equality comparisons on floating-point
+    /// ### What it does
+    /// Checks for (in-)equality comparisons on floating-point
     /// value and constant, except in functions called `*eq*` (which probably
     /// implement equality for a type involving floats).
     ///
-    /// **Why is this bad?** Floating point calculations are usually imprecise, so
+    /// ### Why is this bad?
+    /// Floating point calculations are usually imprecise, so
     /// asking if two values are *exactly* equal is asking for trouble. For a good
     /// guide on what to do, see [the floating point
     /// guide](http://www.floating-point-gui.de/errors/comparison).
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let x: f64 = 1.0;
     /// const ONE: f64 = 1.00;
@@ -302,60 +309,61 @@ impl<'tcx> LateLintPass<'tcx> for MiscLints {
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
         if_chain! {
             if !in_external_macro(cx.tcx.sess, stmt.span);
-            if let StmtKind::Local(ref local) = stmt.kind;
+            if let StmtKind::Local(local) = stmt.kind;
             if let PatKind::Binding(an, .., name, None) = local.pat.kind;
-            if let Some(ref init) = local.init;
+            if let Some(init) = local.init;
             if !higher::is_from_for_desugar(local);
+            if an == BindingAnnotation::Ref || an == BindingAnnotation::RefMut;
             then {
-                if an == BindingAnnotation::Ref || an == BindingAnnotation::RefMut {
-                    // use the macro callsite when the init span (but not the whole local span)
-                    // comes from an expansion like `vec![1, 2, 3]` in `let ref _ = vec![1, 2, 3];`
-                    let sugg_init = if init.span.from_expansion() && !local.span.from_expansion() {
-                        Sugg::hir_with_macro_callsite(cx, init, "..")
-                    } else {
-                        Sugg::hir(cx, init, "..")
-                    };
-                    let (mutopt, initref) = if an == BindingAnnotation::RefMut {
-                        ("mut ", sugg_init.mut_addr())
-                    } else {
-                        ("", sugg_init.addr())
-                    };
-                    let tyopt = if let Some(ref ty) = local.ty {
-                        format!(": &{mutopt}{ty}", mutopt=mutopt, ty=snippet(cx, ty.span, ".."))
-                    } else {
-                        String::new()
-                    };
-                    span_lint_hir_and_then(
-                        cx,
-                        TOPLEVEL_REF_ARG,
-                        init.hir_id,
-                        local.pat.span,
-                        "`ref` on an entire `let` pattern is discouraged, take a reference with `&` instead",
-                        |diag| {
-                            diag.span_suggestion(
-                                stmt.span,
-                                "try",
-                                format!(
-                                    "let {name}{tyopt} = {initref};",
-                                    name=snippet(cx, name.span, ".."),
-                                    tyopt=tyopt,
-                                    initref=initref,
-                                ),
-                                Applicability::MachineApplicable,
-                            );
-                        }
-                    );
-                }
+                // use the macro callsite when the init span (but not the whole local span)
+                // comes from an expansion like `vec![1, 2, 3]` in `let ref _ = vec![1, 2, 3];`
+                let sugg_init = if init.span.from_expansion() && !local.span.from_expansion() {
+                    Sugg::hir_with_macro_callsite(cx, init, "..")
+                } else {
+                    Sugg::hir(cx, init, "..")
+                };
+                let (mutopt, initref) = if an == BindingAnnotation::RefMut {
+                    ("mut ", sugg_init.mut_addr())
+                } else {
+                    ("", sugg_init.addr())
+                };
+                let tyopt = if let Some(ty) = local.ty {
+                    format!(": &{mutopt}{ty}", mutopt=mutopt, ty=snippet(cx, ty.span, ".."))
+                } else {
+                    String::new()
+                };
+                span_lint_hir_and_then(
+                    cx,
+                    TOPLEVEL_REF_ARG,
+                    init.hir_id,
+                    local.pat.span,
+                    "`ref` on an entire `let` pattern is discouraged, take a reference with `&` instead",
+                    |diag| {
+                        diag.span_suggestion(
+                            stmt.span,
+                            "try",
+                            format!(
+                                "let {name}{tyopt} = {initref};",
+                                name=snippet(cx, name.span, ".."),
+                                tyopt=tyopt,
+                                initref=initref,
+                            ),
+                            Applicability::MachineApplicable,
+                        );
+                    }
+                );
             }
         };
         if_chain! {
-            if let StmtKind::Semi(ref expr) = stmt.kind;
-            if let ExprKind::Binary(ref binop, ref a, ref b) = expr.kind;
+            if let StmtKind::Semi(expr) = stmt.kind;
+            if let ExprKind::Binary(ref binop, a, b) = expr.kind;
             if binop.node == BinOpKind::And || binop.node == BinOpKind::Or;
             if let Some(sugg) = Sugg::hir_opt(cx, a);
             then {
-                span_lint_and_then(cx,
+                span_lint_hir_and_then(
+                    cx,
                     SHORT_CIRCUIT_STATEMENT,
+                    expr.hir_id,
                     stmt.span,
                     "boolean short circuit operator in statement may be clearer using an explicit test",
                     |diag| {
@@ -377,11 +385,11 @@ impl<'tcx> LateLintPass<'tcx> for MiscLints {
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         match expr.kind {
-            ExprKind::Cast(ref e, ref ty) => {
+            ExprKind::Cast(e, ty) => {
                 check_cast(cx, expr.span, e, ty);
                 return;
             },
-            ExprKind::Binary(ref cmp, ref left, ref right) => {
+            ExprKind::Binary(ref cmp, left, right) => {
                 check_binary(cx, expr, cmp, left, right);
                 return;
             },
@@ -460,21 +468,18 @@ fn check_nan(cx: &LateContext<'_>, expr: &Expr<'_>, cmp_expr: &Expr<'_>) {
     if_chain! {
         if !in_constant(cx, cmp_expr.hir_id);
         if let Some((value, _)) = constant(cx, cx.typeck_results(), expr);
+        if match value {
+            Constant::F32(num) => num.is_nan(),
+            Constant::F64(num) => num.is_nan(),
+            _ => false,
+        };
         then {
-            let needs_lint = match value {
-                Constant::F32(num) => num.is_nan(),
-                Constant::F64(num) => num.is_nan(),
-                _ => false,
-            };
-
-            if needs_lint {
-                span_lint(
-                    cx,
-                    CMP_NAN,
-                    cmp_expr.span,
-                    "doomed comparison with `NAN`, use `{f32,f64}::is_nan()` instead",
-                );
-            }
+            span_lint(
+                cx,
+                CMP_NAN,
+                cmp_expr.span,
+                "doomed comparison with `NAN`, use `{f32,f64}::is_nan()` instead",
+            );
         }
     }
 }
@@ -503,17 +508,17 @@ fn is_allowed<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) -> bool {
 // Return true if `expr` is the result of `signum()` invoked on a float value.
 fn is_signum(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     // The negation of a signum is still a signum
-    if let ExprKind::Unary(UnOp::Neg, ref child_expr) = expr.kind {
-        return is_signum(cx, &child_expr);
+    if let ExprKind::Unary(UnOp::Neg, child_expr) = expr.kind {
+        return is_signum(cx, child_expr);
     }
 
     if_chain! {
-        if let ExprKind::MethodCall(ref method_name, _, ref expressions, _) = expr.kind;
+        if let ExprKind::MethodCall(method_name, _, [ref self_arg, ..], _) = expr.kind;
         if sym!(signum) == method_name.ident.name;
         // Check that the receiver of the signum() is a float (expressions[0] is the receiver of
         // the method call)
         then {
-            return is_float(cx, &expressions[0]);
+            return is_float(cx, self_arg);
         }
     }
     false
@@ -554,11 +559,11 @@ fn check_to_owned(cx: &LateContext<'_>, expr: &Expr<'_>, other: &Expr<'_>, left:
     }
 
     let (arg_ty, snip) = match expr.kind {
-        ExprKind::MethodCall(.., ref args, _) if args.len() == 1 => {
+        ExprKind::MethodCall(.., args, _) if args.len() == 1 => {
             if_chain!(
                 if let Some(expr_def_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id);
-                if is_diagnostic_assoc_item(cx, expr_def_id, sym::ToString)
-                    || is_diagnostic_assoc_item(cx, expr_def_id, sym::ToOwned);
+                if is_diag_trait_item(cx, expr_def_id, sym::ToString)
+                    || is_diag_trait_item(cx, expr_def_id, sym::ToOwned);
                 then {
                     (cx.typeck_results().expr_ty(&args[0]), snippet(cx, args[0].span, ".."))
                 } else {
@@ -566,13 +571,13 @@ fn check_to_owned(cx: &LateContext<'_>, expr: &Expr<'_>, other: &Expr<'_>, left:
                 }
             )
         },
-        ExprKind::Call(ref path, ref v) if v.len() == 1 => {
-            if let ExprKind::Path(ref path) = path.kind {
-                if match_qpath(path, &["String", "from_str"]) || match_qpath(path, &["String", "from"]) {
-                    (cx.typeck_results().expr_ty(&v[0]), snippet(cx, v[0].span, ".."))
-                } else {
-                    return;
-                }
+        ExprKind::Call(path, [arg]) => {
+            if expr_path_res(cx, path)
+                .opt_def_id()
+                .and_then(|id| match_any_def_paths(cx, id, &[&paths::FROM_STR_METHOD, &paths::FROM_FROM]))
+                .is_some()
+            {
+                (cx.typeck_results().expr_ty(arg), snippet(cx, arg.span, ".."))
             } else {
                 return;
             }
@@ -651,7 +656,7 @@ fn check_to_owned(cx: &LateContext<'_>, expr: &Expr<'_>, other: &Expr<'_>, left:
 /// of what it means for an expression to be "used".
 fn is_used(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     get_parent_expr(cx, expr).map_or(true, |parent| match parent.kind {
-        ExprKind::Assign(_, ref rhs, _) | ExprKind::AssignOp(_, _, ref rhs) => SpanlessEq::new(cx).eq_expr(rhs, expr),
+        ExprKind::Assign(_, rhs, _) | ExprKind::AssignOp(_, _, rhs) => SpanlessEq::new(cx).eq_expr(rhs, expr),
         _ => is_used(cx, parent),
     })
 }

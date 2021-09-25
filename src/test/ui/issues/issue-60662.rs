@@ -3,8 +3,7 @@
 
 #![feature(type_alias_impl_trait)]
 
-trait Animal {
-}
+trait Animal {}
 
 fn main() {
     pub type ServeFut = impl Animal;

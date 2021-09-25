@@ -1,18 +1,19 @@
-use crate::utils::{span_lint, SpanlessEq};
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::SpanlessEq;
 use if_chain::if_chain;
 use rustc_hir::{BinOpKind, Expr, ExprKind, QPath};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Detects classic underflow/overflow checks.
+    /// ### What it does
+    /// Detects classic underflow/overflow checks.
     ///
-    /// **Why is this bad?** Most classic C underflow/overflow checks will fail in
+    /// ### Why is this bad?
+    /// Most classic C underflow/overflow checks will fail in
     /// Rust. Users can use functions like `overflowing_*` and `wrapping_*` instead.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let a = 1;
     /// # let b = 2;
@@ -30,11 +31,11 @@ impl<'tcx> LateLintPass<'tcx> for OverflowCheckConditional {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         let eq = |l, r| SpanlessEq::new(cx).eq_path_segment(l, r);
         if_chain! {
-            if let ExprKind::Binary(ref op, ref first, ref second) = expr.kind;
-            if let ExprKind::Binary(ref op2, ref ident1, ref ident2) = first.kind;
-            if let ExprKind::Path(QPath::Resolved(_, ref path1)) = ident1.kind;
-            if let ExprKind::Path(QPath::Resolved(_, ref path2)) = ident2.kind;
-            if let ExprKind::Path(QPath::Resolved(_, ref path3)) = second.kind;
+            if let ExprKind::Binary(ref op, first, second) = expr.kind;
+            if let ExprKind::Binary(ref op2, ident1, ident2) = first.kind;
+            if let ExprKind::Path(QPath::Resolved(_, path1)) = ident1.kind;
+            if let ExprKind::Path(QPath::Resolved(_, path2)) = ident2.kind;
+            if let ExprKind::Path(QPath::Resolved(_, path3)) = second.kind;
             if eq(&path1.segments[0], &path3.segments[0]) || eq(&path2.segments[0], &path3.segments[0]);
             if cx.typeck_results().expr_ty(ident1).is_integral();
             if cx.typeck_results().expr_ty(ident2).is_integral();
@@ -55,11 +56,11 @@ impl<'tcx> LateLintPass<'tcx> for OverflowCheckConditional {
         }
 
         if_chain! {
-            if let ExprKind::Binary(ref op, ref first, ref second) = expr.kind;
-            if let ExprKind::Binary(ref op2, ref ident1, ref ident2) = second.kind;
-            if let ExprKind::Path(QPath::Resolved(_, ref path1)) = ident1.kind;
-            if let ExprKind::Path(QPath::Resolved(_, ref path2)) = ident2.kind;
-            if let ExprKind::Path(QPath::Resolved(_, ref path3)) = first.kind;
+            if let ExprKind::Binary(ref op, first, second) = expr.kind;
+            if let ExprKind::Binary(ref op2, ident1, ident2) = second.kind;
+            if let ExprKind::Path(QPath::Resolved(_, path1)) = ident1.kind;
+            if let ExprKind::Path(QPath::Resolved(_, path2)) = ident2.kind;
+            if let ExprKind::Path(QPath::Resolved(_, path3)) = first.kind;
             if eq(&path1.segments[0], &path3.segments[0]) || eq(&path2.segments[0], &path3.segments[0]);
             if cx.typeck_results().expr_ty(ident1).is_integral();
             if cx.typeck_results().expr_ty(ident2).is_integral();

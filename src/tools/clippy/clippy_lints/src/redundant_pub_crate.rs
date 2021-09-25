@@ -1,20 +1,19 @@
-use crate::utils::span_lint_and_then;
+use clippy_utils::diagnostics::span_lint_and_then;
 use rustc_errors::Applicability;
 use rustc_hir::{Item, ItemKind, VisibilityKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for items declared `pub(crate)` that are not crate visible because they
+    /// ### What it does
+    /// Checks for items declared `pub(crate)` that are not crate visible because they
     /// are inside a private module.
     ///
-    /// **Why is this bad?** Writing `pub(crate)` is misleading when it's redundant due to the parent
+    /// ### Why is this bad?
+    /// Writing `pub(crate)` is misleading when it's redundant due to the parent
     /// module's visibility.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// mod internal {
     ///     pub(crate) fn internal_fn() { }
@@ -42,7 +41,7 @@ impl_lint_pass!(RedundantPubCrate => [REDUNDANT_PUB_CRATE]);
 impl<'tcx> LateLintPass<'tcx> for RedundantPubCrate {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         if let VisibilityKind::Crate { .. } = item.vis.node {
-            if !cx.access_levels.is_exported(item.hir_id()) {
+            if !cx.access_levels.is_exported(item.def_id) {
                 if let Some(false) = self.is_exported.last() {
                     let span = item.span.with_hi(item.ident.span.hi());
                     let descr = cx.tcx.def_kind(item.def_id).descr(item.def_id.to_def_id());
@@ -59,13 +58,13 @@ impl<'tcx> LateLintPass<'tcx> for RedundantPubCrate {
                                 Applicability::MachineApplicable,
                             );
                         },
-                    )
+                    );
                 }
             }
         }
 
         if let ItemKind::Mod { .. } = item.kind {
-            self.is_exported.push(cx.access_levels.is_exported(item.hir_id()));
+            self.is_exported.push(cx.access_levels.is_exported(item.def_id));
         }
     }
 

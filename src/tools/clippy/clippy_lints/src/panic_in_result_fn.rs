@@ -1,4 +1,6 @@
-use crate::utils::{find_macro_calls, is_type_diagnostic_item, return_ty, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::ty::is_type_diagnostic_item;
+use clippy_utils::{find_macro_calls, is_expn_of, return_ty};
 use rustc_hir as hir;
 use rustc_hir::intravisit::FnKind;
 use rustc_lint::{LateContext, LateLintPass};
@@ -6,14 +8,16 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::{sym, Span};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `panic!`, `unimplemented!`, `todo!`, `unreachable!` or assertions in a function of type result.
+    /// ### What it does
+    /// Checks for usage of `panic!`, `unimplemented!`, `todo!`, `unreachable!` or assertions in a function of type result.
     ///
-    /// **Why is this bad?** For some codebases, it is desirable for functions of type result to return an error instead of crashing. Hence panicking macros should be avoided.
+    /// ### Why is this bad?
+    /// For some codebases, it is desirable for functions of type result to return an error instead of crashing. Hence panicking macros should be avoided.
     ///
-    /// **Known problems:** Functions called from a function returning a `Result` may invoke a panicking macro. This is not checked.
+    /// ### Known problems
+    /// Functions called from a function returning a `Result` may invoke a panicking macro. This is not checked.
     ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// fn result_with_panic() -> Result<bool, String>
     /// {
@@ -50,7 +54,7 @@ impl<'tcx> LateLintPass<'tcx> for PanicInResultFn {
 }
 
 fn lint_impl_body<'tcx>(cx: &LateContext<'tcx>, impl_span: Span, body: &'tcx hir::Body<'tcx>) {
-    let panics = find_macro_calls(
+    let mut panics = find_macro_calls(
         &[
             "unimplemented",
             "unreachable",
@@ -59,12 +63,10 @@ fn lint_impl_body<'tcx>(cx: &LateContext<'tcx>, impl_span: Span, body: &'tcx hir
             "assert",
             "assert_eq",
             "assert_ne",
-            "debug_assert",
-            "debug_assert_eq",
-            "debug_assert_ne",
         ],
         body,
     );
+    panics.retain(|span| is_expn_of(*span, "debug_assert").is_none());
     if !panics.is_empty() {
         span_lint_and_then(
             cx,

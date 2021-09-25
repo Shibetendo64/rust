@@ -1,4 +1,5 @@
-use crate::utils::{snippet_with_applicability, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::source::snippet_with_applicability;
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::{BindingAnnotation, Mutability, Node, Pat, PatKind};
@@ -6,12 +7,15 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for bindings that destructure a reference and borrow the inner
+    /// ### What it does
+    /// Checks for bindings that destructure a reference and borrow the inner
     /// value with `&ref`.
     ///
-    /// **Why is this bad?** This pattern has no effect in almost all cases.
+    /// ### Why is this bad?
+    /// This pattern has no effect in almost all cases.
     ///
-    /// **Known problems:** In some cases, `&ref` is needed to avoid a lifetime mismatch error.
+    /// ### Known problems
+    /// In some cases, `&ref` is needed to avoid a lifetime mismatch error.
     /// Example:
     /// ```rust
     /// fn foo(a: &Option<String>, b: &Option<String>) {
@@ -22,7 +26,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     ///
-    /// **Example:**
+    /// ### Example
     /// Bad:
     /// ```rust
     /// let mut v = Vec::<String>::new();
@@ -50,7 +54,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBorrowedRef {
 
         if_chain! {
             // Only lint immutable refs, because `&mut ref T` may be useful.
-            if let PatKind::Ref(ref sub_pat, Mutability::Not) = pat.kind;
+            if let PatKind::Ref(sub_pat, Mutability::Not) = pat.kind;
 
             // Check sub_pat got a `ref` keyword (excluding `ref mut`).
             if let PatKind::Binding(BindingAnnotation::Ref, .., spanned_name, _) = sub_pat.kind;

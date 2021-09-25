@@ -7,28 +7,26 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(array_windows)]
-#![feature(control_flow_enum)]
-#![feature(in_band_lifetimes)]
-#![feature(unboxed_closures)]
-#![feature(generator_trait)]
-#![feature(fn_traits)]
-#![feature(int_bits_const)]
-#![feature(min_specialization)]
-#![feature(auto_traits)]
-#![feature(nll)]
 #![feature(allow_internal_unstable)]
-#![feature(hash_raw_entry)]
-#![feature(stmt_expr_attributes)]
-#![feature(core_intrinsics)]
-#![feature(test)]
+#![feature(array_windows)]
 #![feature(associated_type_bounds)]
-#![feature(thread_id_value)]
-#![feature(extend_one)]
+#![feature(auto_traits)]
+#![feature(bool_to_option)]
 #![feature(const_panic)]
-#![feature(new_uninit)]
-#![feature(once_cell)]
+#![feature(control_flow_enum)]
+#![feature(core_intrinsics)]
+#![feature(extend_one)]
+#![feature(hash_raw_entry)]
+#![feature(in_band_lifetimes)]
 #![feature(maybe_uninit_uninit_array)]
+#![feature(min_specialization)]
+#![feature(never_type)]
+#![feature(type_alias_impl_trait)]
+#![feature(new_uninit)]
+#![feature(nll)]
+#![feature(once_cell)]
+#![feature(test)]
+#![feature(thread_id_value)]
 #![allow(rustc::default_hash_types)]
 #![deny(unaligned_references)]
 
@@ -67,7 +65,6 @@ macro_rules! unlikely {
 
 pub mod base_n;
 pub mod binary_search_util;
-pub mod box_region;
 pub mod captures;
 pub mod flock;
 pub mod functor;
@@ -85,6 +82,7 @@ pub mod snapshot_map;
 pub mod stable_map;
 pub mod svh;
 pub use ena::snapshot_vec;
+pub mod memmap;
 pub mod sorted_map;
 pub mod stable_set;
 #[macro_use]
@@ -99,6 +97,7 @@ pub mod thin_vec;
 pub mod tiny_list;
 pub mod transitive_relation;
 pub mod vec_linked_list;
+pub mod vec_map;
 pub mod work_queue;
 pub use atomic_ref::AtomicRef;
 pub mod frozen;

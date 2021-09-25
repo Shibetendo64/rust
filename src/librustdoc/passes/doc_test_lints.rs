@@ -3,13 +3,14 @@
 //! - MISSING_DOC_CODE_EXAMPLES: this lint is **UNSTABLE** and looks for public items missing doctests
 //! - PRIVATE_DOC_TESTS: this lint is **STABLE** and looks for private items with doctests.
 
-use super::{span_of_attrs, Pass};
+use super::Pass;
 use crate::clean;
 use crate::clean::*;
 use crate::core::DocContext;
 use crate::fold::DocFolder;
 use crate::html::markdown::{find_testable_code, ErrorCodes, Ignore, LangString};
 use crate::visit_ast::inherits_doc_hidden;
+use rustc_hir as hir;
 use rustc_middle::lint::LintLevelSource;
 use rustc_session::lint;
 use rustc_span::symbol::sym;
@@ -53,7 +54,7 @@ impl crate::doctest::Tester for Tests {
 }
 
 crate fn should_have_doc_example(cx: &DocContext<'_>, item: &clean::Item) -> bool {
-    if !cx.cache.access_levels.is_public(item.def_id)
+    if !cx.cache.access_levels.is_public(item.def_id.expect_def_id())
         || matches!(
             *item.kind,
             clean::StructFieldItem(_)
@@ -67,13 +68,35 @@ crate fn should_have_doc_example(cx: &DocContext<'_>, item: &clean::Item) -> boo
                 | clean::ImportItem(_)
                 | clean::PrimitiveItem(_)
                 | clean::KeywordItem(_)
+                // check for trait impl
+                | clean::ImplItem(clean::Impl { trait_: Some(_), .. })
         )
     {
         return false;
     }
-    let hir_id = cx.tcx.hir().local_def_id_to_hir_id(item.def_id.expect_local());
+
+    // The `expect_def_id()` should be okay because `local_def_id_to_hir_id`
+    // would presumably panic if a fake `DefIndex` were passed.
+    let hir_id = cx.tcx.hir().local_def_id_to_hir_id(item.def_id.expect_def_id().expect_local());
+
+    // check if parent is trait impl
+    if let Some(parent_hir_id) = cx.tcx.hir().find_parent_node(hir_id) {
+        if let Some(parent_node) = cx.tcx.hir().find(parent_hir_id) {
+            if matches!(
+                parent_node,
+                hir::Node::Item(hir::Item {
+                    kind: hir::ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }),
+                    ..
+                })
+            ) {
+                return false;
+            }
+        }
+    }
+
     if cx.tcx.hir().attrs(hir_id).lists(sym::doc).has_word(sym::hidden)
         || inherits_doc_hidden(cx.tcx, hir_id)
+        || cx.tcx.hir().span(hir_id).in_derive_expansion()
     {
         return false;
     }
@@ -97,7 +120,7 @@ crate fn look_for_tests<'tcx>(cx: &DocContext<'tcx>, dox: &str, item: &Item) {
     if tests.found_tests == 0 && cx.tcx.sess.is_nightly_build() {
         if should_have_doc_example(cx, &item) {
             debug!("reporting error for {:?} (hir_id={:?})", item, hir_id);
-            let sp = span_of_attrs(&item.attrs).unwrap_or(item.source.span());
+            let sp = item.attr_span(cx.tcx);
             cx.tcx.struct_span_lint_hir(
                 crate::lint::MISSING_DOC_CODE_EXAMPLES,
                 hir_id,
@@ -105,11 +128,13 @@ crate fn look_for_tests<'tcx>(cx: &DocContext<'tcx>, dox: &str, item: &Item) {
                 |lint| lint.build("missing code example in this documentation").emit(),
             );
         }
-    } else if tests.found_tests > 0 && !cx.cache.access_levels.is_public(item.def_id) {
+    } else if tests.found_tests > 0
+        && !cx.cache.access_levels.is_public(item.def_id.expect_def_id())
+    {
         cx.tcx.struct_span_lint_hir(
             crate::lint::PRIVATE_DOC_TESTS,
             hir_id,
-            span_of_attrs(&item.attrs).unwrap_or(item.source.span()),
+            item.attr_span(cx.tcx),
             |lint| lint.build("documentation test in private item").emit(),
         );
     }

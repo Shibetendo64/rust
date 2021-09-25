@@ -1,18 +1,18 @@
-use crate::consts::{constant_simple, Constant};
-use crate::utils::span_lint_and_help;
+use clippy_utils::consts::{constant_simple, Constant};
+use clippy_utils::diagnostics::span_lint_and_help;
 use if_chain::if_chain;
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `0.0 / 0.0`.
+    /// ### What it does
+    /// Checks for `0.0 / 0.0`.
     ///
-    /// **Why is this bad?** It's less readable than `f32::NAN` or `f64::NAN`.
+    /// ### Why is this bad?
+    /// It's less readable than `f32::NAN` or `f64::NAN`.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// // Bad
     /// let nan = 0.0f32 / 0.0;
@@ -31,7 +31,7 @@ impl<'tcx> LateLintPass<'tcx> for ZeroDiv {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         // check for instances of 0.0/0.0
         if_chain! {
-            if let ExprKind::Binary(ref op, ref left, ref right) = expr.kind;
+            if let ExprKind::Binary(ref op, left, right) = expr.kind;
             if let BinOpKind::Div = op.node;
             // TODO - constant_simple does not fold many operations involving floats.
             // That's probably fine for this lint - it's pretty unlikely that someone would

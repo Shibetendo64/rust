@@ -46,16 +46,15 @@ use self::Constructor::*;
 use self::SliceKind::*;
 
 use super::compare_const_vals;
-use super::usefulness::{MatchCheckCtxt, PatCtxt};
-use super::{FieldPat, Pat, PatKind, PatRange};
+use super::usefulness::{is_wildcard, MatchCheckCtxt, PatCtxt};
 
 use rustc_data_structures::captures::Captures;
 use rustc_index::vec::Idx;
 
-use rustc_hir::def_id::DefId;
 use rustc_hir::{HirId, RangeEnd};
 use rustc_middle::mir::interpret::ConstValue;
 use rustc_middle::mir::Field;
+use rustc_middle::thir::{FieldPat, Pat, PatKind, PatRange};
 use rustc_middle::ty::layout::IntegerExt;
 use rustc_middle::ty::{self, Const, Ty, TyCtxt};
 use rustc_session::lint;
@@ -124,7 +123,7 @@ impl IntRange {
                     // straight to the result, after doing a bit of checking. (We
                     // could remove this branch and just fall through, which
                     // is more general but much slower.)
-                    if let Ok(bits) = scalar.to_bits_or_ptr(target_size, &tcx) {
+                    if let Ok(bits) = scalar.to_bits_or_ptr_internal(target_size) {
                         return Some(bits);
                     }
                 }
@@ -590,7 +589,7 @@ pub(super) enum Constructor<'tcx> {
     /// and fixed-length arrays.
     Single,
     /// Enum variants.
-    Variant(DefId),
+    Variant(VariantIdx),
     /// Ranges of integer literal values (`2`, `2..=5` or `2..5`).
     IntRange(IntRange),
     /// Ranges of floating-point literal values (`2.0..=5.2`).
@@ -607,8 +606,9 @@ pub(super) enum Constructor<'tcx> {
     /// for those types for which we cannot list constructors explicitly, like `f64` and `str`.
     NonExhaustive,
     /// Stands for constructors that are not seen in the matrix, as explained in the documentation
-    /// for [`SplitWildcard`].
-    Missing,
+    /// for [`SplitWildcard`]. The carried `bool` is used for the `non_exhaustive_omitted_patterns`
+    /// lint.
+    Missing { nonexhaustive_enum_missing_real_variants: bool },
     /// Wildcard pattern.
     Wildcard,
 }
@@ -616,6 +616,10 @@ pub(super) enum Constructor<'tcx> {
 impl<'tcx> Constructor<'tcx> {
     pub(super) fn is_wildcard(&self) -> bool {
         matches!(self, Wildcard)
+    }
+
+    pub(super) fn is_non_exhaustive(&self) -> bool {
+        matches!(self, NonExhaustive)
     }
 
     fn as_int_range(&self) -> Option<&IntRange> {
@@ -634,7 +638,7 @@ impl<'tcx> Constructor<'tcx> {
 
     fn variant_index_for_adt(&self, adt: &'tcx ty::AdtDef) -> VariantIdx {
         match *self {
-            Variant(id) => adt.variant_index_with_id(id),
+            Variant(idx) => idx,
             Single => {
                 assert!(!adt.is_enum());
                 VariantIdx::new(0)
@@ -649,9 +653,7 @@ impl<'tcx> Constructor<'tcx> {
             PatKind::AscribeUserType { .. } => bug!(), // Handled by `expand_pattern`
             PatKind::Binding { .. } | PatKind::Wild => Wildcard,
             PatKind::Leaf { .. } | PatKind::Deref { .. } => Single,
-            &PatKind::Variant { adt_def, variant_index, .. } => {
-                Variant(adt_def.variants[variant_index].def_id)
-            }
+            &PatKind::Variant { variant_index, .. } => Variant(variant_index),
             PatKind::Constant { value } => {
                 if let Some(int_range) = IntRange::from_const(cx.tcx, cx.param_env, value) {
                     IntRange(int_range)
@@ -759,7 +761,7 @@ impl<'tcx> Constructor<'tcx> {
             // Wildcards cover anything
             (_, Wildcard) => true,
             // The missing ctors are not covered by anything in the matrix except wildcards.
-            (Missing | Wildcard, _) => false,
+            (Missing { .. } | Wildcard, _) => false,
 
             (Single, Single) => true,
             (Variant(self_id), Variant(other_id)) => self_id == other_id,
@@ -832,7 +834,7 @@ impl<'tcx> Constructor<'tcx> {
                 .any(|other| slice.is_covered_by(other)),
             // This constructor is never covered by anything else
             NonExhaustive => false,
-            Str(..) | FloatRange(..) | Opaque | Missing | Wildcard => {
+            Str(..) | FloatRange(..) | Opaque | Missing { .. } | Wildcard => {
                 span_bug!(pcx.span, "found unexpected ctor in all_ctors: {:?}", self)
             }
         }
@@ -922,21 +924,27 @@ impl<'tcx> SplitWildcard<'tcx> {
                     && !cx.tcx.features().exhaustive_patterns
                     && !pcx.is_top_level;
 
-                if is_secretly_empty || is_declared_nonexhaustive {
+                if is_secretly_empty {
                     smallvec![NonExhaustive]
+                } else if is_declared_nonexhaustive {
+                    def.variants
+                        .indices()
+                        .map(|idx| Variant(idx))
+                        .chain(Some(NonExhaustive))
+                        .collect()
                 } else if cx.tcx.features().exhaustive_patterns {
                     // If `exhaustive_patterns` is enabled, we exclude variants known to be
                     // uninhabited.
                     def.variants
-                        .iter()
-                        .filter(|v| {
+                        .iter_enumerated()
+                        .filter(|(_, v)| {
                             !v.uninhabited_from(cx.tcx, substs, def.adt_kind(), cx.param_env)
                                 .contains(cx.tcx, cx.module)
                         })
-                        .map(|v| Variant(v.def_id))
+                        .map(|(idx, _)| Variant(idx))
                         .collect()
                 } else {
-                    def.variants.iter().map(|v| Variant(v.def_id)).collect()
+                    def.variants.indices().map(|idx| Variant(idx)).collect()
                 }
             }
             ty::Char => {
@@ -978,6 +986,7 @@ impl<'tcx> SplitWildcard<'tcx> {
             // This type is one for which we cannot list constructors, like `str` or `f64`.
             _ => smallvec![NonExhaustive],
         };
+
         SplitWildcard { matrix_ctors: Vec::new(), all_ctors }
     }
 
@@ -1042,7 +1051,17 @@ impl<'tcx> SplitWildcard<'tcx> {
             // sometimes prefer reporting the list of constructors instead of just `_`.
             let report_when_all_missing = pcx.is_top_level && !IntRange::is_integral(pcx.ty);
             let ctor = if !self.matrix_ctors.is_empty() || report_when_all_missing {
-                Missing
+                if pcx.is_non_exhaustive {
+                    Missing {
+                        nonexhaustive_enum_missing_real_variants: self
+                            .iter_missing(pcx)
+                            .filter(|c| !c.is_non_exhaustive())
+                            .next()
+                            .is_some(),
+                    }
+                } else {
+                    Missing { nonexhaustive_enum_missing_real_variants: false }
+                }
             } else {
                 Wildcard
             };
@@ -1179,7 +1198,12 @@ impl<'p, 'tcx> Fields<'p, 'tcx> {
                 }
                 _ => bug!("bad slice pattern {:?} {:?}", constructor, ty),
             },
-            Str(..) | FloatRange(..) | IntRange(..) | NonExhaustive | Opaque | Missing
+            Str(..)
+            | FloatRange(..)
+            | IntRange(..)
+            | NonExhaustive
+            | Opaque
+            | Missing { .. }
             | Wildcard => Fields::Slice(&[]),
         };
         debug!("Fields::wildcards({:?}, {:?}) = {:#?}", constructor, ty, ret);
@@ -1192,15 +1216,18 @@ impl<'p, 'tcx> Fields<'p, 'tcx> {
     /// This is roughly the inverse of `specialize_constructor`.
     ///
     /// Examples:
-    /// `ctor`: `Constructor::Single`
-    /// `ty`: `Foo(u32, u32, u32)`
-    /// `self`: `[10, 20, _]`
+    ///
+    /// ```text
+    /// ctor: `Constructor::Single`
+    /// ty: `Foo(u32, u32, u32)`
+    /// self: `[10, 20, _]`
     /// returns `Foo(10, 20, _)`
     ///
-    /// `ctor`: `Constructor::Variant(Option::Some)`
-    /// `ty`: `Option<bool>`
-    /// `self`: `[false]`
+    /// ctor: `Constructor::Variant(Option::Some)`
+    /// ty: `Option<bool>`
+    /// self: `[false]`
     /// returns `Some(false)`
+    /// ```
     pub(super) fn apply(self, pcx: PatCtxt<'_, 'p, 'tcx>, ctor: &Constructor<'tcx>) -> Pat<'tcx> {
         let subpatterns_and_indices = self.patterns_and_indices();
         let mut subpatterns = subpatterns_and_indices.iter().map(|&(_, p)| p).cloned();
@@ -1248,13 +1275,13 @@ impl<'p, 'tcx> Fields<'p, 'tcx> {
                         // of reporting `[x, _, .., _, y]`, we prefer to report `[x, .., y]`.
                         // This is incorrect if the size is not known, since `[_, ..]` captures
                         // arrays of lengths `>= 1` whereas `[..]` captures any length.
-                        while !prefix.is_empty() && prefix.last().unwrap().is_wildcard() {
+                        while !prefix.is_empty() && is_wildcard(prefix.last().unwrap()) {
                             prefix.pop();
                         }
                     }
                     let suffix: Vec<_> = if slice.array_len.is_some() {
                         // Same as above.
-                        subpatterns.skip_while(Pat::is_wildcard).collect()
+                        subpatterns.skip_while(is_wildcard).collect()
                     } else {
                         subpatterns.collect()
                     };
@@ -1268,7 +1295,7 @@ impl<'p, 'tcx> Fields<'p, 'tcx> {
             NonExhaustive => PatKind::Wild,
             Wildcard => return Pat::wildcard_from_ty(pcx.ty),
             Opaque => bug!("we should not try to apply an opaque constructor"),
-            Missing => bug!(
+            Missing { .. } => bug!(
                 "trying to apply the `Missing` constructor; this should have been done in `apply_constructors`"
             ),
         };

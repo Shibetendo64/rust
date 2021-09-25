@@ -126,7 +126,8 @@ impl<'a> MutVisitor for TestHarnessGenerator<'a> {
                 for test in &mut tests {
                     // See the comment on `mk_main` for why we're using
                     // `apply_mark` directly.
-                    test.ident.span = test.ident.span.apply_mark(expn_id, Transparency::Opaque);
+                    test.ident.span =
+                        test.ident.span.apply_mark(expn_id.to_expn_id(), Transparency::Opaque);
                 }
                 self.cx.test_cases.extend(tests);
             }
@@ -142,7 +143,7 @@ fn entry_point_type(sess: &Session, item: &ast::Item, depth: usize) -> EntryPoin
         ast::ItemKind::Fn(..) => {
             if sess.contains_name(&item.attrs, sym::start) {
                 EntryPointType::Start
-            } else if sess.contains_name(&item.attrs, sym::main) {
+            } else if sess.contains_name(&item.attrs, sym::rustc_main) {
                 EntryPointType::MainAttr
             } else if item.ident.name == sym::main {
                 if depth == 1 {
@@ -187,8 +188,7 @@ impl<'a> MutVisitor for EntryPointCleaner<'a> {
                     let attrs = attrs
                         .into_iter()
                         .filter(|attr| {
-                            !self.sess.check_name(attr, sym::main)
-                                && !self.sess.check_name(attr, sym::start)
+                            !attr.has_name(sym::rustc_main) && !attr.has_name(sym::start)
                         })
                         .chain(iter::once(allow_dead_code))
                         .collect();
@@ -220,10 +220,10 @@ fn generate_test_harness(
     let expn_id = ext_cx.resolver.expansion_for_ast_pass(
         DUMMY_SP,
         AstPass::TestHarness,
-        &[sym::main, sym::test, sym::rustc_attrs],
+        &[sym::test, sym::rustc_attrs],
         None,
     );
-    let def_site = DUMMY_SP.with_def_site_ctxt(expn_id);
+    let def_site = DUMMY_SP.with_def_site_ctxt(expn_id.to_expn_id());
 
     // Remove the entry points
     let mut cleaner = EntryPointCleaner { sess, depth: 0, def_site };
@@ -247,7 +247,7 @@ fn generate_test_harness(
 /// By default this expands to
 ///
 /// ```
-/// #[main]
+/// #[rustc_main]
 /// pub fn main() {
 ///     extern crate test;
 ///     test::test_main_static(&[
@@ -297,8 +297,8 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
     let test_extern_stmt =
         ecx.stmt_item(sp, ecx.item(sp, test_id, vec![], ast::ItemKind::ExternCrate(None)));
 
-    // #[main]
-    let main_meta = ecx.meta_word(sp, sym::main);
+    // #[rustc_main]
+    let main_meta = ecx.meta_word(sp, sym::rustc_main);
     let main_attr = ecx.attribute(main_meta);
 
     // pub fn main() { ... }
@@ -314,8 +314,12 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
     let decl = ecx.fn_decl(vec![], ast::FnRetTy::Ty(main_ret_ty));
     let sig = ast::FnSig { decl, header: ast::FnHeader::default(), span: sp };
     let def = ast::Defaultness::Final;
-    let main =
-        ast::ItemKind::Fn(box ast::FnKind(def, sig, ast::Generics::default(), Some(main_body)));
+    let main = ast::ItemKind::Fn(Box::new(ast::FnKind(
+        def,
+        sig,
+        ast::Generics::default(),
+        Some(main_body),
+    )));
 
     // Honor the reexport_test_harness_main attribute
     let main_id = match cx.reexport_test_harness_main {

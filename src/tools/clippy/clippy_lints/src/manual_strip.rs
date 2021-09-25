@@ -1,9 +1,8 @@
-use crate::consts::{constant, Constant};
-use crate::utils::usage::mutated_variables;
-use crate::utils::{
-    eq_expr_value, higher, match_def_path, meets_msrv, multispan_sugg, paths, snippet, span_lint_and_then,
-};
-
+use clippy_utils::consts::{constant, Constant};
+use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
+use clippy_utils::source::snippet;
+use clippy_utils::usage::mutated_variables;
+use clippy_utils::{eq_expr_value, higher, match_def_path, meets_msrv, msrvs, paths};
 use if_chain::if_chain;
 use rustc_ast::ast::LitKind;
 use rustc_hir::def::Res;
@@ -18,24 +17,18 @@ use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Spanned;
 use rustc_span::Span;
 
-const MANUAL_STRIP_MSRV: RustcVersion = RustcVersion::new(1, 45, 0);
-
 declare_clippy_lint! {
-    /// **What it does:**
+    /// ### What it does
     /// Suggests using `strip_{prefix,suffix}` over `str::{starts,ends}_with` and slicing using
     /// the pattern's length.
     ///
-    /// **Why is this bad?**
+    /// ### Why is this bad?
     /// Using `str:strip_{prefix,suffix}` is safer and may have better performance as there is no
     /// slicing which may panic and the compiler does not need to insert this panic code. It is
     /// also sometimes more readable as it removes the need for duplicating or storing the pattern
     /// used by `str::{starts,ends}_with` and in the slicing.
     ///
-    /// **Known problems:**
-    /// None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// let s = "hello, world!";
     /// if s.starts_with("hello, ") {
@@ -75,12 +68,12 @@ enum StripKind {
 
 impl<'tcx> LateLintPass<'tcx> for ManualStrip {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if !meets_msrv(self.msrv.as_ref(), &MANUAL_STRIP_MSRV) {
+        if !meets_msrv(self.msrv.as_ref(), &msrvs::STR_STRIP_PREFIX) {
             return;
         }
 
         if_chain! {
-            if let ExprKind::If(cond, then, _) = &expr.kind;
+            if let Some(higher::If { cond, then, .. }) = higher::If::hir(expr);
             if let ExprKind::MethodCall(_, _, [target_arg, pattern], _) = cond.kind;
             if let Some(method_def_id) = cx.typeck_results().type_dependent_def_id(cond.hir_id);
             if let ExprKind::Path(target_path) = &target_arg.kind;
@@ -92,7 +85,7 @@ impl<'tcx> LateLintPass<'tcx> for ManualStrip {
                 } else {
                     return;
                 };
-                let target_res = cx.qpath_res(&target_path, target_arg.hir_id);
+                let target_res = cx.qpath_res(target_path, target_arg.hir_id);
                 if target_res == Res::Err {
                     return;
                 };
@@ -126,7 +119,7 @@ impl<'tcx> LateLintPass<'tcx> for ManualStrip {
                                           kind_word,
                                           snippet(cx, pattern.span, "..")))]
                             .into_iter().chain(strippings.into_iter().map(|span| (span, "<stripped>".into()))),
-                        )
+                        );
                     });
                 }
             }
@@ -175,7 +168,7 @@ fn eq_pattern_length<'tcx>(cx: &LateContext<'tcx>, pattern: &Expr<'_>, expr: &'t
 
 // Tests if `expr` is a `&str`.
 fn is_ref_str(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    match cx.typeck_results().expr_ty_adjusted(&expr).kind() {
+    match cx.typeck_results().expr_ty_adjusted(expr).kind() {
         ty::Ref(_, ty, _) => ty.is_str(),
         _ => false,
     }
@@ -219,7 +212,7 @@ fn find_stripping<'tcx>(
                 if is_ref_str(self.cx, ex);
                 let unref = peel_ref(ex);
                 if let ExprKind::Index(indexed, index) = &unref.kind;
-                if let Some(higher::Range { start, end, .. }) = higher::range(index);
+                if let Some(higher::Range { start, end, .. }) = higher::Range::hir(index);
                 if let ExprKind::Path(path) = &indexed.kind;
                 if self.cx.qpath_res(path, ex.hir_id) == self.target;
                 then {

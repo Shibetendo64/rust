@@ -41,7 +41,7 @@
 //! instructions to implement `AtomicI8`. Note that this emulation should not
 //! have an impact on correctness of code, it's just something to be aware of.
 //!
-//! The atomic types in this module may not be available on all platforms. The
+//! The atomic types in this module might not be available on all platforms. The
 //! atomic types here are all widely available, however, and can generally be
 //! relied upon existing. Some notable exceptions are:
 //!
@@ -78,7 +78,7 @@
 //! ```
 //! use std::sync::Arc;
 //! use std::sync::atomic::{AtomicUsize, Ordering};
-//! use std::thread;
+//! use std::{hint, thread};
 //!
 //! fn main() {
 //!     let spinlock = Arc::new(AtomicUsize::new(1));
@@ -89,7 +89,9 @@
 //!     });
 //!
 //!     // Wait for the other thread to release the lock
-//!     while spinlock.load(Ordering::SeqCst) != 0 {}
+//!     while spinlock.load(Ordering::SeqCst) != 0 {
+//!         hint::spin_loop();
+//!     }
 //!
 //!     if let Err(panic) = thread.join() {
 //!         println!("Thread had an error: {:?}", panic);
@@ -111,6 +113,7 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 #![cfg_attr(not(target_has_atomic_load_store = "8"), allow(dead_code))]
 #![cfg_attr(not(target_has_atomic_load_store = "8"), allow(unused_imports))]
+#![rustc_diagnostic_item = "atomic_mod"]
 
 use self::Ordering::*;
 
@@ -135,7 +138,8 @@ pub struct AtomicBool {
 
 #[cfg(target_has_atomic_load_store = "8")]
 #[stable(feature = "rust1", since = "1.0.0")]
-impl Default for AtomicBool {
+#[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
+impl const Default for AtomicBool {
     /// Creates an `AtomicBool` initialized to `false`.
     #[inline]
     fn default() -> Self {
@@ -165,7 +169,8 @@ pub struct AtomicPtr<T> {
 
 #[cfg(target_has_atomic_load_store = "ptr")]
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T> Default for AtomicPtr<T> {
+#[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
+impl<T> const Default for AtomicPtr<T> {
     /// Creates a null `AtomicPtr<T>`.
     fn default() -> AtomicPtr<T> {
         AtomicPtr::new(crate::ptr::null_mut())
@@ -196,6 +201,7 @@ unsafe impl<T> Sync for AtomicPtr<T> {}
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
+#[rustc_diagnostic_item = "Ordering"]
 pub enum Ordering {
     /// No ordering constraints, only atomic operations.
     ///
@@ -283,7 +289,7 @@ impl AtomicBool {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_stable(feature = "const_atomic_new", since = "1.32.0")]
+    #[rustc_const_stable(feature = "const_atomic_new", since = "1.24.0")]
     pub const fn new(v: bool) -> AtomicBool {
         AtomicBool { v: UnsafeCell::new(v as u8) }
     }
@@ -837,7 +843,6 @@ impl AtomicBool {
     /// # Examples
     ///
     /// ```rust
-    /// #![feature(atomic_fetch_update)]
     /// use std::sync::atomic::{AtomicBool, Ordering};
     ///
     /// let x = AtomicBool::new(false);
@@ -847,7 +852,7 @@ impl AtomicBool {
     /// assert_eq!(x.load(Ordering::SeqCst), false);
     /// ```
     #[inline]
-    #[unstable(feature = "atomic_fetch_update", reason = "recently added", issue = "78639")]
+    #[stable(feature = "atomic_fetch_update", since = "1.53.0")]
     #[cfg(target_has_atomic = "8")]
     pub fn fetch_update<F>(
         &self,
@@ -883,7 +888,7 @@ impl<T> AtomicPtr<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_stable(feature = "const_atomic_new", since = "1.32.0")]
+    #[rustc_const_stable(feature = "const_atomic_new", since = "1.24.0")]
     pub const fn new(p: *mut T) -> AtomicPtr<T> {
         AtomicPtr { p: UnsafeCell::new(p) }
     }
@@ -898,8 +903,10 @@ impl<T> AtomicPtr<T> {
     /// ```
     /// use std::sync::atomic::{AtomicPtr, Ordering};
     ///
-    /// let mut atomic_ptr = AtomicPtr::new(&mut 10);
-    /// *atomic_ptr.get_mut() = &mut 5;
+    /// let mut data = 10;
+    /// let mut atomic_ptr = AtomicPtr::new(&mut data);
+    /// let mut other_data = 5;
+    /// *atomic_ptr.get_mut() = &mut other_data;
     /// assert_eq!(unsafe { *atomic_ptr.load(Ordering::SeqCst) }, 5);
     /// ```
     #[inline]
@@ -916,9 +923,11 @@ impl<T> AtomicPtr<T> {
     /// #![feature(atomic_from_mut)]
     /// use std::sync::atomic::{AtomicPtr, Ordering};
     ///
-    /// let mut some_ptr = &mut 123 as *mut i32;
+    /// let mut data = 123;
+    /// let mut some_ptr = &mut data as *mut i32;
     /// let a = AtomicPtr::from_mut(&mut some_ptr);
-    /// a.store(&mut 456, Ordering::Relaxed);
+    /// let mut other_data = 456;
+    /// a.store(&mut other_data, Ordering::Relaxed);
     /// assert_eq!(unsafe { *some_ptr }, 456);
     /// ```
     #[inline]
@@ -944,7 +953,8 @@ impl<T> AtomicPtr<T> {
     /// ```
     /// use std::sync::atomic::AtomicPtr;
     ///
-    /// let atomic_ptr = AtomicPtr::new(&mut 5);
+    /// let mut data = 5;
+    /// let atomic_ptr = AtomicPtr::new(&mut data);
     /// assert_eq!(unsafe { *atomic_ptr.into_inner() }, 5);
     /// ```
     #[inline]
@@ -1220,7 +1230,6 @@ impl<T> AtomicPtr<T> {
     /// # Examples
     ///
     /// ```rust
-    /// #![feature(atomic_fetch_update)]
     /// use std::sync::atomic::{AtomicPtr, Ordering};
     ///
     /// let ptr: *mut _ = &mut 5;
@@ -1239,7 +1248,7 @@ impl<T> AtomicPtr<T> {
     /// assert_eq!(some_ptr.load(Ordering::SeqCst), new);
     /// ```
     #[inline]
-    #[unstable(feature = "atomic_fetch_update", reason = "recently added", issue = "78639")]
+    #[stable(feature = "atomic_fetch_update", since = "1.53.0")]
     #[cfg(target_has_atomic = "ptr")]
     pub fn fetch_update<F>(
         &self,
@@ -1344,7 +1353,8 @@ macro_rules! atomic_int {
         pub const $atomic_init: $atomic_type = $atomic_type::new(0);
 
         #[$stable]
-        impl Default for $atomic_type {
+        #[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
+        impl const Default for $atomic_type {
             #[inline]
             fn default() -> Self {
                 Self::new(Default::default())
@@ -2276,7 +2286,7 @@ macro_rules! atomic_int_ptr_sized {
             stable(feature = "atomic_access", since = "1.15.0"),
             stable(feature = "atomic_from", since = "1.23.0"),
             stable(feature = "atomic_nand", since = "1.27.0"),
-            rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
+            rustc_const_stable(feature = "const_integer_atomics", since = "1.24.0"),
             stable(feature = "rust1", since = "1.0.0"),
             "isize",
             "",
@@ -2296,7 +2306,7 @@ macro_rules! atomic_int_ptr_sized {
             stable(feature = "atomic_access", since = "1.15.0"),
             stable(feature = "atomic_from", since = "1.23.0"),
             stable(feature = "atomic_nand", since = "1.27.0"),
-            rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
+            rustc_const_stable(feature = "const_integer_atomics", since = "1.24.0"),
             stable(feature = "rust1", since = "1.0.0"),
             "usize",
             "",
@@ -2643,7 +2653,11 @@ unsafe fn atomic_umin<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 ///
 ///     pub fn lock(&self) {
 ///         // Wait until the old value is `false`.
-///         while self.flag.compare_and_swap(false, true, Ordering::Relaxed) != false {}
+///         while self
+///             .flag
+///             .compare_exchange_weak(false, true, Ordering::Relaxed, Ordering::Relaxed)
+///             .is_err()
+///         {}
 ///         // This fence synchronizes-with store in `unlock`.
 ///         fence(Ordering::Acquire);
 ///     }
@@ -2655,6 +2669,7 @@ unsafe fn atomic_umin<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 /// ```
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[rustc_diagnostic_item = "fence"]
 pub fn fence(order: Ordering) {
     // SAFETY: using an atomic fence is safe.
     unsafe {
@@ -2705,7 +2720,7 @@ pub fn fence(order: Ordering) {
 /// Without `compiler_fence`, the `assert_eq!` in following code
 /// is *not* guaranteed to succeed, despite everything happening in a single thread.
 /// To see why, remember that the compiler is free to swap the stores to
-/// `IMPORTANT_VARIABLE` and `IS_READ` since they are both
+/// `IMPORTANT_VARIABLE` and `IS_READY` since they are both
 /// `Ordering::Relaxed`. If it does, and the signal handler is invoked right
 /// after `IS_READY` is updated, then the signal handler will see
 /// `IS_READY=1`, but `IMPORTANT_VARIABLE=0`.
@@ -2736,6 +2751,7 @@ pub fn fence(order: Ordering) {
 /// [memory barriers]: https://www.kernel.org/doc/Documentation/memory-barriers.txt
 #[inline]
 #[stable(feature = "compiler_fences", since = "1.21.0")]
+#[rustc_diagnostic_item = "compiler_fence"]
 pub fn compiler_fence(order: Ordering) {
     // SAFETY: using an atomic fence is safe.
     unsafe {

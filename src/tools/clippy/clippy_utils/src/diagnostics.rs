@@ -1,4 +1,12 @@
 //! Clippy wrappers around rustc's diagnostic functions.
+//!
+//! These functions are used by the `INTERNAL_METADATA_COLLECTOR` lint to collect the corresponding
+//! lint applicability. Please make sure that you update the `LINT_EMISSION_FUNCTIONS` variable in
+//! `clippy_lints::utils::internal_lints::metadata_collector` when a new function is added
+//! or renamed.
+//!
+//! Thank you!
+//! ~The `INTERNAL_METADATA_COLLECTOR` lint
 
 use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_hir::HirId;
@@ -8,14 +16,16 @@ use std::env;
 
 fn docs_link(diag: &mut DiagnosticBuilder<'_>, lint: &'static Lint) {
     if env::var("CLIPPY_DISABLE_DOCS_LINKS").is_err() {
-        diag.help(&format!(
-            "for further information visit https://rust-lang.github.io/rust-clippy/{}/index.html#{}",
-            &option_env!("RUST_RELEASE_NUM").map_or("master".to_string(), |n| {
-                // extract just major + minor version and ignore patch versions
-                format!("rust-{}", n.rsplitn(2, '.').nth(1).unwrap())
-            }),
-            lint.name_lower().replacen("clippy::", "", 1)
-        ));
+        if let Some(lint) = lint.name_lower().strip_prefix("clippy::") {
+            diag.help(&format!(
+                "for further information visit https://rust-lang.github.io/rust-clippy/{}/index.html#{}",
+                &option_env!("RUST_RELEASE_NUM").map_or("master".to_string(), |n| {
+                    // extract just major + minor version and ignore patch versions
+                    format!("rust-{}", n.rsplit_once('.').unwrap().1)
+                }),
+                lint
+            ));
+        }
     }
 }
 
@@ -55,7 +65,7 @@ pub fn span_lint<T: LintContext>(cx: &T, lint: &'static Lint, sp: impl Into<Mult
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// error: constant division of 0.0 with 0.0 will always result in NaN
 ///   --> $DIR/zero_div_zero.rs:6:25
 ///    |
@@ -93,7 +103,7 @@ pub fn span_lint_and_help<'a, T: LintContext>(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// error: calls to `std::mem::forget` with a reference instead of an owned value. Forgetting a reference does nothing.
 ///   --> $DIR/drop_forget_ref.rs:10:5
 ///    |
@@ -131,9 +141,11 @@ pub fn span_lint_and_note<'a, T: LintContext>(
 ///
 /// If you need to customize your lint output a lot, use this function.
 /// If you change the signature, remember to update the internal lint `CollapsibleCalls`
-pub fn span_lint_and_then<'a, T: LintContext, F>(cx: &'a T, lint: &'static Lint, sp: Span, msg: &str, f: F)
+pub fn span_lint_and_then<C, S, F>(cx: &C, lint: &'static Lint, sp: S, msg: &str, f: F)
 where
-    F: for<'b> FnOnce(&mut DiagnosticBuilder<'b>),
+    C: LintContext,
+    S: Into<MultiSpan>,
+    F: FnOnce(&mut DiagnosticBuilder<'_>),
 {
     cx.struct_span_lint(lint, sp, |diag| {
         let mut diag = diag.build(msg);
@@ -155,7 +167,7 @@ pub fn span_lint_hir_and_then(
     cx: &LateContext<'_>,
     lint: &'static Lint,
     hir_id: HirId,
-    sp: Span,
+    sp: impl Into<MultiSpan>,
     msg: &str,
     f: impl FnOnce(&mut DiagnosticBuilder<'_>),
 ) {
@@ -177,7 +189,7 @@ pub fn span_lint_hir_and_then(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// error: This `.fold` can be more succinctly expressed as `.any`
 /// --> $DIR/methods.rs:390:13
 ///     |
@@ -211,9 +223,14 @@ pub fn multispan_sugg<I>(diag: &mut DiagnosticBuilder<'_>, help_msg: &str, sugg:
 where
     I: IntoIterator<Item = (Span, String)>,
 {
-    multispan_sugg_with_applicability(diag, help_msg, Applicability::Unspecified, sugg)
+    multispan_sugg_with_applicability(diag, help_msg, Applicability::Unspecified, sugg);
 }
 
+/// Create a suggestion made from several `span → replacement`.
+///
+/// rustfix currently doesn't support the automatic application of suggestions with
+/// multiple spans. This is tracked in issue [rustfix#141](https://github.com/rust-lang/rustfix/issues/141).
+/// Suggestions with multiple spans will be silently ignored.
 pub fn multispan_sugg_with_applicability<I>(
     diag: &mut DiagnosticBuilder<'_>,
     help_msg: &str,

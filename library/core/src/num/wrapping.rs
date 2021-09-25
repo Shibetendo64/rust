@@ -32,6 +32,10 @@ use crate::ops::{Shl, ShlAssign, Shr, ShrAssign, Sub, SubAssign};
 ///
 /// assert_eq!(u32::MAX, (zero - one).0);
 /// ```
+///
+/// # Layout
+///
+/// `Wrapping<T>` is guaranteed to have the same layout and ABI as `T`.
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default, Hash)]
 #[repr(transparent)]
@@ -432,6 +436,21 @@ macro_rules! wrapping_int_impl {
             /// ```
             #[unstable(feature = "wrapping_int_impl", issue = "32463")]
             pub const MAX: Self = Self(<$t>::MAX);
+
+            /// Returns the size of this integer type in bits.
+            ///
+            /// # Examples
+            ///
+            /// Basic usage:
+            ///
+            /// ```
+            /// #![feature(wrapping_int_impl)]
+            /// use std::num::Wrapping;
+            ///
+            #[doc = concat!("assert_eq!(<Wrapping<", stringify!($t), ">>::BITS, ", stringify!($t), "::BITS);")]
+            /// ```
+            #[unstable(feature = "wrapping_int_impl", issue = "32463")]
+            pub const BITS: u32 = <$t>::BITS;
 
             /// Returns the number of ones in the binary representation of `self`.
             ///

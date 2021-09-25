@@ -6,7 +6,9 @@
 type Foo = impl Copy; //~ could not find defining uses
 
 // make compiler happy about using 'Foo'
-fn bar(x: Foo) -> Foo { x }
+fn bar(x: Foo) -> Foo {
+    x
+}
 
 fn main() {
     let _: Foo = std::mem::transmute(0u8);

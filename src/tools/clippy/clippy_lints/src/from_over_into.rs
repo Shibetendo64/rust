@@ -1,22 +1,20 @@
-use crate::utils::paths::INTO;
-use crate::utils::{match_def_path, meets_msrv, span_lint_and_help};
+use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::{meets_msrv, msrvs};
 use if_chain::if_chain;
 use rustc_hir as hir;
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_semver::RustcVersion;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
-
-const FROM_OVER_INTO_MSRV: RustcVersion = RustcVersion::new(1, 41, 0);
+use rustc_span::symbol::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Searches for implementations of the `Into<..>` trait and suggests to implement `From<..>` instead.
+    /// ### What it does
+    /// Searches for implementations of the `Into<..>` trait and suggests to implement `From<..>` instead.
     ///
-    /// **Why is this bad?** According the std docs implementing `From<..>` is preferred since it gives you `Into<..>` for free where the reverse isn't true.
+    /// ### Why is this bad?
+    /// According the std docs implementing `From<..>` is preferred since it gives you `Into<..>` for free where the reverse isn't true.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// struct StringWrapper(String);
     ///
@@ -56,14 +54,14 @@ impl_lint_pass!(FromOverInto => [FROM_OVER_INTO]);
 
 impl LateLintPass<'_> for FromOverInto {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx hir::Item<'_>) {
-        if !meets_msrv(self.msrv.as_ref(), &FROM_OVER_INTO_MSRV) {
+        if !meets_msrv(self.msrv.as_ref(), &msrvs::RE_REBALANCING_COHERENCE) {
             return;
         }
 
         if_chain! {
             if let hir::ItemKind::Impl{ .. } = &item.kind;
             if let Some(impl_trait_ref) = cx.tcx.impl_trait_ref(item.def_id);
-            if match_def_path(cx, impl_trait_ref.def_id, &INTO);
+            if cx.tcx.is_diagnostic_item(sym::into_trait, impl_trait_ref.def_id);
 
             then {
                 span_lint_and_help(
@@ -72,7 +70,7 @@ impl LateLintPass<'_> for FromOverInto {
                     cx.tcx.sess.source_map().guess_head_span(item.span),
                     "an implementation of `From` is preferred since it gives you `Into<_>` for free where the reverse isn't true",
                     None,
-                    "consider to implement `From` instead",
+                    &format!("consider to implement `From<{}>` instead", impl_trait_ref.self_ty()),
                 );
             }
         }

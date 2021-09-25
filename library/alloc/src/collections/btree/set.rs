@@ -1,6 +1,7 @@
 // This is pretty much entirely stolen from TreeSet, since BTreeMap has an identical interface
 // to TreeMap
 
+use crate::vec::Vec;
 use core::borrow::Borrow;
 use core::cmp::Ordering::{Equal, Greater, Less};
 use core::cmp::{max, min};
@@ -58,6 +59,14 @@ use super::Recover;
 /// for book in &books {
 ///     println!("{}", book);
 /// }
+/// ```
+///
+/// A `BTreeSet` with a known list of items can be initialized from an array:
+///
+/// ```
+/// use std::collections::BTreeSet;
+///
+/// let set = BTreeSet::from([1, 2, 3]);
 /// ```
 #[derive(Hash, PartialEq, Eq, Ord, PartialOrd)]
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -238,10 +247,7 @@ impl<T> BTreeSet<T> {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
-    pub const fn new() -> BTreeSet<T>
-    where
-        T: Ord,
-    {
+    pub const fn new() -> BTreeSet<T> {
         BTreeSet { map: BTreeMap::new() }
     }
 
@@ -810,7 +816,6 @@ impl<T> BTreeSet<T> {
     /// assert_eq!(set.remove(&2), true);
     /// assert_eq!(set.remove(&2), false);
     /// ```
-    #[doc(alias = "delete")]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn remove<Q: ?Sized>(&mut self, value: &Q) -> bool
     where
@@ -847,11 +852,11 @@ impl<T> BTreeSet<T> {
     /// Retains only the elements specified by the predicate.
     ///
     /// In other words, remove all elements `e` such that `f(&e)` returns `false`.
+    /// The elements are visited in ascending order.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(btree_retain)]
     /// use std::collections::BTreeSet;
     ///
     /// let xs = [1, 2, 3, 4, 5, 6];
@@ -860,7 +865,7 @@ impl<T> BTreeSet<T> {
     /// set.retain(|&k| k % 2 == 0);
     /// assert!(set.iter().eq([2, 4, 6].iter()));
     /// ```
-    #[unstable(feature = "btree_retain", issue = "79025")]
+    #[stable(feature = "btree_retain", since = "1.53.0")]
     pub fn retain<F>(&mut self, mut f: F)
     where
         T: Ord,
@@ -905,8 +910,8 @@ impl<T> BTreeSet<T> {
         self.map.append(&mut other.map);
     }
 
-    /// Splits the collection into two at the given key. Returns everything after the given key,
-    /// including the key.
+    /// Splits the collection into two at the given value. Returns everything after the given value,
+    /// including the value.
     ///
     /// # Examples
     ///
@@ -935,25 +940,27 @@ impl<T> BTreeSet<T> {
     /// assert!(b.contains(&41));
     /// ```
     #[stable(feature = "btree_split_off", since = "1.11.0")]
-    pub fn split_off<Q: ?Sized + Ord>(&mut self, key: &Q) -> Self
+    pub fn split_off<Q: ?Sized + Ord>(&mut self, value: &Q) -> Self
     where
         T: Borrow<Q> + Ord,
     {
-        BTreeSet { map: self.map.split_off(key) }
+        BTreeSet { map: self.map.split_off(value) }
     }
 
-    /// Creates an iterator which uses a closure to determine if a value should be removed.
+    /// Creates an iterator that visits all values in ascending order and uses a closure
+    /// to determine if a value should be removed.
     ///
-    /// If the closure returns true, then the value is removed and yielded.
-    /// If the closure returns false, the value will remain in the list and will not be yielded
-    /// by the iterator.
+    /// If the closure returns `true`, the value is removed from the set and yielded. If
+    /// the closure returns `false`, or panics, the value remains in the set and will
+    /// not be yielded.
     ///
-    /// If the iterator is only partially consumed or not consumed at all, each of the remaining
-    /// values will still be subjected to the closure and removed and dropped if it returns true.
+    /// If the iterator is only partially consumed or not consumed at all, each of the
+    /// remaining values is still subjected to the closure and removed and dropped if it
+    /// returns `true`.
     ///
-    /// It is unspecified how many more values will be subjected to the closure
-    /// if a panic occurs in the closure, or if a panic occurs while dropping a value, or if the
-    /// `DrainFilter` itself is leaked.
+    /// It is unspecified how many more values will be subjected to the closure if a
+    /// panic occurs in the closure, or if a panic occurs while dropping a value, or if
+    /// the `DrainFilter` itself is leaked.
     ///
     /// # Examples
     ///
@@ -1022,7 +1029,6 @@ impl<T> BTreeSet<T> {
     /// v.insert(1);
     /// assert_eq!(v.len(), 1);
     /// ```
-    #[doc(alias = "length")]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
     pub const fn len(&self) -> usize {
@@ -1051,9 +1057,39 @@ impl<T> BTreeSet<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Ord> FromIterator<T> for BTreeSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> BTreeSet<T> {
-        let mut set = BTreeSet::new();
-        set.extend(iter);
-        set
+        let mut inputs: Vec<_> = iter.into_iter().collect();
+
+        if inputs.is_empty() {
+            return BTreeSet::new();
+        }
+
+        // use stable sort to preserve the insertion order.
+        inputs.sort();
+        let iter = inputs.into_iter().map(|k| (k, ()));
+        let map = BTreeMap::bulk_build_from_sorted_iter(iter);
+        BTreeSet { map }
+    }
+}
+
+#[stable(feature = "std_collections_from_array", since = "1.56.0")]
+impl<T: Ord, const N: usize> From<[T; N]> for BTreeSet<T> {
+    /// ```
+    /// use std::collections::BTreeSet;
+    ///
+    /// let set1 = BTreeSet::from([1, 2, 3, 4]);
+    /// let set2: BTreeSet<_> = [1, 2, 3, 4].into();
+    /// assert_eq!(set1, set2);
+    /// ```
+    fn from(mut arr: [T; N]) -> Self {
+        if N == 0 {
+            return BTreeSet::new();
+        }
+
+        // use stable sort to preserve the insertion order.
+        arr.sort();
+        let iter = core::array::IntoIter::new(arr).map(|k| (k, ()));
+        let map = BTreeMap::bulk_build_from_sorted_iter(iter);
+        BTreeSet { map }
     }
 }
 
@@ -1170,7 +1206,7 @@ impl<'a, T: 'a + Ord + Copy> Extend<&'a T> for BTreeSet<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: Ord> Default for BTreeSet<T> {
+impl<T> Default for BTreeSet<T> {
     /// Creates an empty `BTreeSet`.
     fn default() -> BTreeSet<T> {
         BTreeSet::new()

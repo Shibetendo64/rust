@@ -42,16 +42,22 @@ pub use self::flatten::Flatten;
 #[stable(feature = "iter_copied", since = "1.36.0")]
 pub use self::copied::Copied;
 
-#[unstable(feature = "iter_intersperse", reason = "recently added", issue = "79524")]
+#[stable(feature = "iter_intersperse", since = "1.56.0")]
 pub use self::intersperse::{Intersperse, IntersperseWith};
 
-#[unstable(feature = "iter_map_while", reason = "recently added", issue = "68537")]
+#[stable(feature = "iter_map_while", since = "1.57.0")]
 pub use self::map_while::MapWhile;
 
 #[unstable(feature = "trusted_random_access", issue = "none")]
 pub use self::zip::TrustedRandomAccess;
 
-/// This trait provides transitive access to source-stage in an interator-adapter pipeline
+#[unstable(feature = "trusted_random_access", issue = "none")]
+pub use self::zip::TrustedRandomAccessNoCoerce;
+
+#[unstable(feature = "iter_zip", issue = "83574")]
+pub use self::zip::zip;
+
+/// This trait provides transitive access to source-stage in an iterator-adapter pipeline
 /// under the conditions that
 /// * the iterator source `S` itself implements `SourceIter<Source = S>`
 /// * there is a delegating implementation of this trait for each adapter in the pipeline between
@@ -85,6 +91,7 @@ pub use self::zip::TrustedRandomAccess;
 /// [`FromIterator`]: crate::iter::FromIterator
 /// [`as_inner`]: SourceIter::as_inner
 #[unstable(issue = "none", feature = "inplace_iteration")]
+#[doc(hidden)]
 pub unsafe trait SourceIter {
     /// A source stage in an iterator pipeline.
     type Source: Iterator;
@@ -164,7 +171,7 @@ where
     fn try_fold<B, F, R>(&mut self, init: B, mut f: F) -> R
     where
         F: FnMut(B, Self::Item) -> R,
-        R: Try<Ok = B>,
+        R: Try<Output = B>,
     {
         let error = &mut *self.error;
         self.iter
@@ -190,4 +197,27 @@ where
 
         self.try_fold(init, ok(fold)).unwrap()
     }
+}
+
+#[unstable(issue = "none", feature = "inplace_iteration")]
+unsafe impl<S: Iterator, I, E> SourceIter for ResultShunt<'_, I, E>
+where
+    I: SourceIter<Source = S>,
+{
+    type Source = S;
+
+    #[inline]
+    unsafe fn as_inner(&mut self) -> &mut S {
+        // SAFETY: unsafe function forwarding to unsafe function with the same requirements
+        unsafe { SourceIter::as_inner(&mut self.iter) }
+    }
+}
+
+// SAFETY: ResultShunt::next calls I::find, which has to advance `iter` in order to
+// return `Some(_)`. Since `iter` has type `I: InPlaceIterable` it's guaranteed that
+// at least one item will be moved out from the underlying source.
+#[unstable(issue = "none", feature = "inplace_iteration")]
+unsafe impl<I, T, E> InPlaceIterable for ResultShunt<'_, I, E> where
+    I: Iterator<Item = Result<T, E>> + InPlaceIterable
+{
 }

@@ -1,23 +1,23 @@
+use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::ty::{implements_trait, is_type_diagnostic_item};
+use clippy_utils::{get_trait_def_id, paths, return_ty, trait_ref_of_method};
 use if_chain::if_chain;
 use rustc_hir::{ImplItem, ImplItemKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::sym;
 
-use crate::utils::{
-    get_trait_def_id, implements_trait, is_type_diagnostic_item, paths, return_ty, span_lint_and_help,
-    trait_ref_of_method,
-};
-
 declare_clippy_lint! {
-    /// **What it does:** Checks for the definition of inherent methods with a signature of `to_string(&self) -> String`.
+    /// ### What it does
+    /// Checks for the definition of inherent methods with a signature of `to_string(&self) -> String`.
     ///
-    /// **Why is this bad?** This method is also implicitly defined if a type implements the `Display` trait. As the functionality of `Display` is much more versatile, it should be preferred.
+    /// ### Why is this bad?
+    /// This method is also implicitly defined if a type implements the `Display` trait. As the functionality of `Display` is much more versatile, it should be preferred.
     ///
-    /// **Known problems:** None
+    /// ### Known problems
+    /// None
     ///
-    /// ** Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// // Bad
     /// pub struct A;
@@ -47,14 +47,16 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for the definition of inherent methods with a signature of `to_string(&self) -> String` and if the type implementing this method also implements the `Display` trait.
+    /// ### What it does
+    /// Checks for the definition of inherent methods with a signature of `to_string(&self) -> String` and if the type implementing this method also implements the `Display` trait.
     ///
-    /// **Why is this bad?** This method is also implicitly defined if a type implements the `Display` trait. The less versatile inherent method will then shadow the implementation introduced by `Display`.
+    /// ### Why is this bad?
+    /// This method is also implicitly defined if a type implements the `Display` trait. The less versatile inherent method will then shadow the implementation introduced by `Display`.
     ///
-    /// **Known problems:** None
+    /// ### Known problems
+    /// None
     ///
-    /// ** Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// // Bad
     /// use std::fmt;

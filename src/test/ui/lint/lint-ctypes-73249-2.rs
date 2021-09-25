@@ -1,9 +1,9 @@
 #![feature(type_alias_impl_trait)]
 #![deny(improper_ctypes)]
 
-pub trait Baz { }
+pub trait Baz {}
 
-impl Baz for () { }
+impl Baz for () {}
 
 type Qux = impl Baz;
 

@@ -1,7 +1,8 @@
 //! Contains utility functions to generate suggestions.
 #![deny(clippy::missing_docs_in_private_items)]
 
-use crate::{higher, snippet, snippet_opt, snippet_with_macro_callsite};
+use crate::higher;
+use crate::source::{snippet, snippet_opt, snippet_with_context, snippet_with_macro_callsite};
 use rustc_ast::util::parser::AssocOp;
 use rustc_ast::{ast, token};
 use rustc_ast_pretty::pprust::token_kind_to_string;
@@ -9,7 +10,7 @@ use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_lint::{EarlyContext, LateContext, LintContext};
 use rustc_span::source_map::{CharPos, Span};
-use rustc_span::{BytePos, Pos};
+use rustc_span::{BytePos, Pos, SyntaxContext};
 use std::borrow::Cow;
 use std::convert::TryInto;
 use std::fmt::Display;
@@ -89,10 +90,33 @@ impl<'a> Sugg<'a> {
         Self::hir_from_snippet(expr, snippet)
     }
 
+    /// Same as `hir`, but first walks the span up to the given context. This will result in the
+    /// macro call, rather then the expansion, if the span is from a child context. If the span is
+    /// not from a child context, it will be used directly instead.
+    ///
+    /// e.g. Given the expression `&vec![]`, getting a snippet from the span for `vec![]` as a HIR
+    /// node would result in `box []`. If given the context of the address of expression, this
+    /// function will correctly get a snippet of `vec![]`.
+    pub fn hir_with_context(
+        cx: &LateContext<'_>,
+        expr: &hir::Expr<'_>,
+        ctxt: SyntaxContext,
+        default: &'a str,
+        applicability: &mut Applicability,
+    ) -> Self {
+        let (snippet, in_macro) = snippet_with_context(cx, expr.span, ctxt, default, applicability);
+
+        if in_macro {
+            Sugg::NonParen(snippet)
+        } else {
+            Self::hir_from_snippet(expr, snippet)
+        }
+    }
+
     /// Generate a suggestion for an expression with the given snippet. This is used by the `hir_*`
     /// function variants of `Sugg`, since these use different snippet functions.
     fn hir_from_snippet(expr: &hir::Expr<'_>, snippet: Cow<'a, str>) -> Self {
-        if let Some(range) = higher::range(expr) {
+        if let Some(range) = higher::Range::hir(expr) {
             let op = match range.limits {
                 ast::RangeLimits::HalfOpen => AssocOp::DotDot,
                 ast::RangeLimits::Closed => AssocOp::DotDotEq,
@@ -104,6 +128,7 @@ impl<'a> Sugg<'a> {
             hir::ExprKind::AddrOf(..)
             | hir::ExprKind::Box(..)
             | hir::ExprKind::If(..)
+            | hir::ExprKind::Let(..)
             | hir::ExprKind::Closure(..)
             | hir::ExprKind::Unary(..)
             | hir::ExprKind::Match(..) => Sugg::MaybeParen(snippet),
@@ -130,7 +155,7 @@ impl<'a> Sugg<'a> {
             | hir::ExprKind::Err => Sugg::NonParen(snippet),
             hir::ExprKind::Assign(..) => Sugg::BinOp(AssocOp::Assign, snippet),
             hir::ExprKind::AssignOp(op, ..) => Sugg::BinOp(hirbinop2assignop(op), snippet),
-            hir::ExprKind::Binary(op, ..) => Sugg::BinOp(AssocOp::from_ast_binop(higher::binop(op.node)), snippet),
+            hir::ExprKind::Binary(op, ..) => Sugg::BinOp(AssocOp::from_ast_binop(op.node.into()), snippet),
             hir::ExprKind::Cast(..) => Sugg::BinOp(AssocOp::As, snippet),
             hir::ExprKind::Type(..) => Sugg::BinOp(AssocOp::Colon, snippet),
         }
@@ -266,18 +291,45 @@ impl<'a> Sugg<'a> {
             Sugg::NonParen(..) => self,
             // `(x)` and `(x).y()` both don't need additional parens.
             Sugg::MaybeParen(sugg) => {
-                if sugg.starts_with('(') && sugg.ends_with(')') {
+                if has_enclosing_paren(&sugg) {
                     Sugg::MaybeParen(sugg)
                 } else {
                     Sugg::NonParen(format!("({})", sugg).into())
                 }
             },
-            Sugg::BinOp(_, sugg) => Sugg::NonParen(format!("({})", sugg).into()),
+            Sugg::BinOp(_, sugg) => {
+                if has_enclosing_paren(&sugg) {
+                    Sugg::NonParen(sugg)
+                } else {
+                    Sugg::NonParen(format!("({})", sugg).into())
+                }
+            },
         }
     }
 }
 
-// Copied from the rust standart library, and then edited
+/// Return `true` if `sugg` is enclosed in parenthesis.
+fn has_enclosing_paren(sugg: impl AsRef<str>) -> bool {
+    let mut chars = sugg.as_ref().chars();
+    if let Some('(') = chars.next() {
+        let mut depth = 1;
+        for c in &mut chars {
+            if c == '(' {
+                depth += 1;
+            } else if c == ')' {
+                depth -= 1;
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        chars.next().is_none()
+    } else {
+        false
+    }
+}
+
+/// Copied from the rust standard library, and then edited
 macro_rules! forward_binop_impls_to_ref {
     (impl $imp:ident, $method:ident for $t:ty, type Output = $o:ty) => {
         impl $imp<$t> for &$t {
@@ -382,7 +434,7 @@ pub fn make_assoc(op: AssocOp, lhs: &Sugg<'_>, rhs: &Sugg<'_>) -> Sugg<'static> 
         matches!(op, AssocOp::ShiftLeft | AssocOp::ShiftRight)
     }
 
-    /// Returns `true` if the operator is a arithmetic operator
+    /// Returns `true` if the operator is an arithmetic operator
     /// (i.e., `+`, `-`, `*`, `/`, `%`).
     fn is_arith(op: AssocOp) -> bool {
         matches!(
@@ -656,7 +708,7 @@ impl<T: LintContext> DiagnosticBuilderExt<T> for rustc_errors::DiagnosticBuilder
 
             if let Some(non_whitespace_offset) = non_whitespace_offset {
                 remove_span = remove_span
-                    .with_hi(remove_span.hi() + BytePos(non_whitespace_offset.try_into().expect("offset too large")))
+                    .with_hi(remove_span.hi() + BytePos(non_whitespace_offset.try_into().expect("offset too large")));
             }
         }
 
@@ -667,6 +719,8 @@ impl<T: LintContext> DiagnosticBuilderExt<T> for rustc_errors::DiagnosticBuilder
 #[cfg(test)]
 mod test {
     use super::Sugg;
+
+    use rustc_ast::util::parser::AssocOp;
     use std::borrow::Cow;
 
     const SUGGESTION: Sugg<'static> = Sugg::NonParen(Cow::Borrowed("function_call()"));
@@ -679,5 +733,14 @@ mod test {
     #[test]
     fn blockify_transforms_sugg_into_a_block() {
         assert_eq!("{ function_call() }", SUGGESTION.blockify().to_string());
+    }
+
+    #[test]
+    fn binop_maybe_par() {
+        let sugg = Sugg::BinOp(AssocOp::Add, "(1 + 1)".into());
+        assert_eq!("(1 + 1)", sugg.maybe_par().to_string());
+
+        let sugg = Sugg::BinOp(AssocOp::Add, "(1 + 1) + (1 + 1)".into());
+        assert_eq!("((1 + 1) + (1 + 1))", sugg.maybe_par().to_string());
     }
 }

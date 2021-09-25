@@ -20,15 +20,17 @@ function getNextStep(content, pos, stop) {
 // will blow up. Template strings are not tested and might also be
 // broken.
 function extractFunction(content, functionName) {
-    var indent = 0;
+    var level = 0;
     var splitter = "function " + functionName + "(";
+    var stop;
+    var pos, start;
 
     while (true) {
-        var start = content.indexOf(splitter);
+        start = content.indexOf(splitter);
         if (start === -1) {
             break;
         }
-        var pos = start;
+        pos = start;
         while (pos < content.length && content[pos] !== ')') {
             pos += 1;
         }
@@ -44,30 +46,33 @@ function extractFunction(content, functionName) {
         }
         while (pos < content.length) {
             // Eat single-line comments
-            if (content[pos] === '/' && pos > 0 && content[pos-1] === '/') {
+            if (content[pos] === '/' && pos > 0 && content[pos - 1] === '/') {
                 do {
                     pos += 1;
                 } while (pos < content.length && content[pos] !== '\n');
 
+            // Eat multiline comment.
+            } else if (content[pos] === '*' && pos > 0 && content[pos - 1] === '/') {
+                do {
+                    pos += 1;
+                } while (pos < content.length && content[pos] !== '/' && content[pos - 1] !== '*');
+
             // Eat quoted strings
             } else if (content[pos] === '"' || content[pos] === "'" || content[pos] === "`") {
-                var stop = content[pos];
-                var is_escaped = false;
+                stop = content[pos];
                 do {
                     if (content[pos] === '\\') {
-                        pos += 2;
-                    } else {
                         pos += 1;
                     }
-                } while (pos < content.length &&
-                         (content[pos] !== stop || content[pos - 1] === '\\'));
+                    pos += 1;
+                } while (pos < content.length && content[pos] !== stop);
 
-            // Otherwise, check for indent
+            // Otherwise, check for block level.
             } else if (content[pos] === '{') {
-                indent += 1;
+                level += 1;
             } else if (content[pos] === '}') {
-                indent -= 1;
-                if (indent === 0) {
+                level -= 1;
+                if (level === 0) {
                     return content.slice(start, pos + 1);
                 }
             }
@@ -246,7 +251,7 @@ function lookForEntry(entry, data) {
     return null;
 }
 
-function loadMainJsAndIndex(mainJs, searchIndex, storageJs, crate) {
+function loadSearchJsAndIndex(searchJs, searchIndex, storageJs, crate) {
     if (searchIndex[searchIndex.length - 1].length === 0) {
         searchIndex.pop();
     }
@@ -264,14 +269,16 @@ function loadMainJsAndIndex(mainJs, searchIndex, storageJs, crate) {
     // execQuery last parameter is built in buildIndex.
     // buildIndex requires the hashmap from search-index.
     var functionsToLoad = ["buildHrefAndPath", "pathSplitter", "levenshtein", "validateResult",
-                           "handleAliases", "getQuery", "buildIndex", "execQuery", "execSearch"];
+                           "handleAliases", "getQuery", "buildIndex", "execQuery", "execSearch",
+                           "removeEmptyStringsFromArray"];
 
+    const functions = ["hasOwnPropertyRustdoc", "onEach"];
     ALIASES = {};
     finalJS += 'window = { "currentCrate": "' + crate + '", rootPath: "../" };\n';
-    finalJS += loadThings(["hasOwnProperty", "onEach"], 'function', extractFunction, storageJs);
-    finalJS += loadThings(arraysToLoad, 'array', extractArrayVariable, mainJs);
-    finalJS += loadThings(variablesToLoad, 'variable', extractVariable, mainJs);
-    finalJS += loadThings(functionsToLoad, 'function', extractFunction, mainJs);
+    finalJS += loadThings(functions, 'function', extractFunction, storageJs);
+    finalJS += loadThings(arraysToLoad, 'array', extractArrayVariable, searchJs);
+    finalJS += loadThings(variablesToLoad, 'variable', extractVariable, searchJs);
+    finalJS += loadThings(functionsToLoad, 'function', extractFunction, searchJs);
 
     var loaded = loadContent(finalJS);
     var index = loaded.buildIndex(searchIndex.rawSearchIndex);
@@ -381,12 +388,12 @@ function runChecks(testFile, loaded, index) {
 }
 
 function load_files(doc_folder, resource_suffix, crate) {
-    var mainJs = readFile(path.join(doc_folder, "main" + resource_suffix + ".js"));
+    var searchJs = readFile(path.join(doc_folder, "search" + resource_suffix + ".js"));
     var storageJs = readFile(path.join(doc_folder, "storage" + resource_suffix + ".js"));
     var searchIndex = readFile(
         path.join(doc_folder, "search-index" + resource_suffix + ".js")).split("\n");
 
-    return loadMainJsAndIndex(mainJs, searchIndex, storageJs, crate);
+    return loadSearchJsAndIndex(searchJs, searchIndex, storageJs, crate);
 }
 
 function showHelp() {

@@ -1,6 +1,9 @@
 macro_rules! unimpl {
     () => {
-        return Err(io::Error::new(io::ErrorKind::Other, "No networking available on L4Re."));
+        return Err(io::Error::new_const(
+            io::ErrorKind::Unsupported,
+            &"No networking available on L4Re.",
+        ));
     };
 }
 
@@ -92,6 +95,14 @@ pub mod net {
         }
 
         pub fn shutdown(&self, _: Shutdown) -> io::Result<()> {
+            unimpl!();
+        }
+
+        pub fn set_linger(&self, _: Option<Duration>) -> io::Result<()> {
+            unimpl!();
+        }
+
+        pub fn linger(&self) -> io::Result<Option<Duration>> {
             unimpl!();
         }
 
@@ -208,6 +219,14 @@ pub mod net {
         }
 
         pub fn duplicate(&self) -> io::Result<TcpStream> {
+            unimpl!();
+        }
+
+        pub fn set_linger(&self, _: Option<Duration>) -> io::Result<()> {
+            unimpl!();
+        }
+
+        pub fn linger(&self) -> io::Result<Option<Duration>> {
             unimpl!();
         }
 

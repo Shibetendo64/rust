@@ -1,14 +1,15 @@
 //! Values computed by queries that use MIR.
 
-use crate::mir::{abstract_const, Body, Promoted};
+use crate::mir::{Body, Promoted};
 use crate::ty::{self, Ty, TyCtxt};
-use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::vec_map::VecMap;
 use rustc_errors::ErrorReported;
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_index::bit_set::BitMatrix;
 use rustc_index::vec::IndexVec;
+use rustc_middle::ty::OpaqueTypeKey;
 use rustc_span::Span;
 use rustc_target::abi::VariantIdx;
 use smallvec::SmallVec;
@@ -19,19 +20,11 @@ use super::{Field, SourceInfo};
 
 #[derive(Copy, Clone, PartialEq, TyEncodable, TyDecodable, HashStable, Debug)]
 pub enum UnsafetyViolationKind {
-    /// Only permitted in regular `fn`s, prohibited in `const fn`s.
+    /// Unsafe operation outside `unsafe`.
     General,
-    /// Permitted both in `const fn`s and regular `fn`s.
-    GeneralAndConstFn,
-    /// Borrow of packed field.
-    /// Has to be handled as a lint for backwards compatibility.
-    BorrowPacked,
     /// Unsafe operation in an `unsafe fn` but outside an `unsafe` block.
     /// Has to be handled as a lint for backwards compatibility.
     UnsafeFn,
-    /// Borrow of packed field in an `unsafe fn` but outside an `unsafe` block.
-    /// Has to be handled as a lint for backwards compatibility.
-    UnsafeFnBorrowPacked,
 }
 
 #[derive(Copy, Clone, PartialEq, TyEncodable, TyDecodable, HashStable, Debug)]
@@ -40,7 +33,6 @@ pub enum UnsafetyViolationDetails {
     UseOfInlineAssembly,
     InitializingTypeWith,
     CastOfPointerToInt,
-    BorrowOfPackedField,
     UseOfMutableStatic,
     UseOfExternStatic,
     DerefOfRawPointer,
@@ -72,11 +64,6 @@ impl UnsafetyViolationDetails {
             CastOfPointerToInt => {
                 ("cast of pointer to int", "casting pointers to integers in constants")
             }
-            BorrowOfPackedField => (
-                "borrow of packed field",
-                "fields of packed structs might be misaligned: dereferencing a misaligned pointer \
-                 or even just creating a misaligned reference is undefined behavior",
-            ),
             UseOfMutableStatic => (
                 "use of mutable static",
                 "mutable statics can be mutated by multiple threads: aliasing violations or data \
@@ -89,7 +76,7 @@ impl UnsafetyViolationDetails {
             ),
             DerefOfRawPointer => (
                 "dereference of raw pointer",
-                "raw pointers may be NULL, dangling or unaligned; they can violate aliasing rules \
+                "raw pointers may be null, dangling or unaligned; they can violate aliasing rules \
                  and cause data races: all of these are undefined behavior",
             ),
             AssignToDroppingUnionField => (
@@ -224,7 +211,7 @@ pub struct BorrowCheckResult<'tcx> {
     /// All the opaque types that are restricted to concrete types
     /// by this function. Unlike the value in `TypeckResults`, this has
     /// unerased regions.
-    pub concrete_opaque_types: FxHashMap<DefId, ty::ResolvedOpaqueTy<'tcx>>,
+    pub concrete_opaque_types: VecMap<OpaqueTypeKey<'tcx>, Ty<'tcx>>,
     pub closure_requirements: Option<ClosureRegionRequirements<'tcx>>,
     pub used_mut_upvars: SmallVec<[Field; 8]>,
 }
@@ -232,7 +219,7 @@ pub struct BorrowCheckResult<'tcx> {
 /// The result of the `mir_const_qualif` query.
 ///
 /// Each field (except `error_occured`) corresponds to an implementer of the `Qualif` trait in
-/// `rustc_mir/src/transform/check_consts/qualifs.rs`. See that file for more information on each
+/// `rustc_const_eval/src/transform/check_consts/qualifs.rs`. See that file for more information on each
 /// `Qualif`.
 #[derive(Clone, Copy, Debug, Default, TyEncodable, TyDecodable, HashStable)]
 pub struct ConstQualifs {
@@ -326,7 +313,7 @@ pub struct ClosureOutlivesRequirement<'tcx> {
 /// are interesting (for error reporting). Order of variants indicates sort
 /// order of the category, thereby influencing diagnostic output.
 ///
-/// See also `rustc_mir::borrow_check::constraints`.
+/// See also `rustc_const_eval::borrow_check::constraints`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 #[derive(TyEncodable, TyDecodable, HashStable)]
 pub enum ConstraintCategory {
@@ -345,17 +332,15 @@ pub enum ConstraintCategory {
     CopyBound,
     SizedBound,
     Assignment,
+    /// A constraint that came from a usage of a variable (e.g. in an ADT expression
+    /// like `Foo { field: my_val }`)
+    Usage,
     OpaqueType,
     ClosureUpvar(hir::HirId),
 
     /// A "boring" constraint (caused by the given location) is one that
     /// the user probably doesn't want to see described in diagnostics,
     /// because it is kind of an artifact of the type system setup.
-    /// Example: `x = Foo { field: y }` technically creates
-    /// intermediate regions representing the "type of `Foo { field: y
-    /// }`", and data flows from `y` into those variables, but they
-    /// are not very interesting. The assignment into `x` on the other
-    /// hand might be.
     Boring,
     // Boring and applicable everywhere.
     BoringNoLocation,
@@ -442,18 +427,6 @@ impl<'tcx> TyCtxt<'tcx> {
             self.mir_for_ctfe_of_const_arg((did, param_did))
         } else {
             self.mir_for_ctfe(def.did)
-        }
-    }
-
-    #[inline]
-    pub fn mir_abstract_const_opt_const_arg(
-        self,
-        def: ty::WithOptConstParam<DefId>,
-    ) -> Result<Option<&'tcx [abstract_const::Node<'tcx>]>, ErrorReported> {
-        if let Some((did, param_did)) = def.as_const_arg() {
-            self.mir_abstract_const_of_const_arg((did, param_did))
-        } else {
-            self.mir_abstract_const(def.did)
         }
     }
 }

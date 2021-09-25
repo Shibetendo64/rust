@@ -16,6 +16,7 @@
 //! A number of these checks can be opted-out of with various directives of the form:
 //! `// ignore-tidy-CHECK-NAME`.
 
+use regex::Regex;
 use std::path::Path;
 
 /// Error code markdown is restricted to 80 columns because they can be
@@ -41,6 +42,20 @@ C++ code used llvm_unreachable, which triggers undefined behavior
 when executed when assertions are disabled.
 Use llvm::report_fatal_error for increased robustness.";
 
+const ANNOTATIONS_TO_IGNORE: &[&str] = &[
+    "// @!has",
+    "// @has",
+    "// @matches",
+    "// CHECK",
+    "// EMIT_MIR",
+    "// compile-flags",
+    "// error-pattern",
+    "// gdb",
+    "// lldb",
+    "// cdb",
+    "// normalize-stderr-test",
+];
+
 /// Parser states for `line_is_url`.
 #[derive(Clone, Copy, PartialEq)]
 #[allow(non_camel_case_types)]
@@ -51,7 +66,7 @@ enum LIUState {
     EXP_END,
 }
 
-/// Returns `true` if `line` appears to be a line comment containing an URL,
+/// Returns `true` if `line` appears to be a line comment containing a URL,
 /// possibly with a Markdown link label in front, and nothing else.
 /// The Markdown link label, if present, may not contain whitespace.
 /// Lines of this form are allowed to be overlength, because Markdown
@@ -92,12 +107,20 @@ fn line_is_url(is_error_code: bool, columns: usize, line: &str) -> bool {
     state == EXP_END
 }
 
+/// Returns `true` if `line` can be ignored. This is the case when it contains
+/// an annotation that is explicitly ignored.
+fn should_ignore(line: &str) -> bool {
+    // Matches test annotations like `//~ ERROR text`.
+    // This mirrors the regex in src/tools/compiletest/src/runtest.rs, please
+    // update both if either are changed.
+    let re = Regex::new("\\s*//(\\[.*\\])?~.*").unwrap();
+    re.is_match(line) || ANNOTATIONS_TO_IGNORE.iter().any(|a| line.contains(a))
+}
+
 /// Returns `true` if `line` is allowed to be longer than the normal limit.
-/// Currently there is only one exception, for long URLs, but more
-/// may be added in the future.
 fn long_line_is_ok(extension: &str, is_error_code: bool, max_columns: usize, line: &str) -> bool {
     if extension != "md" || is_error_code {
-        if line_is_url(is_error_code, max_columns, line) {
+        if line_is_url(is_error_code, max_columns, line) || should_ignore(line) {
             return true;
         }
     } else if extension == "md" {
@@ -321,7 +344,10 @@ pub fn check(path: &Path, bad: &mut bool) {
             } else {
                 trailing_new_lines = 0;
             }
-            lines = i;
+
+            if !line.trim().starts_with("//") {
+                lines += 1;
+            }
         }
         if leading_new_lines {
             tidy_error!(bad, "{}: leading newline", file.display());

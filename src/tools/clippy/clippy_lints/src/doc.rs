@@ -1,7 +1,7 @@
-use crate::utils::{
-    implements_trait, is_entrypoint_fn, is_expn_of, is_type_diagnostic_item, match_panic_def_id, method_chain_args,
-    return_ty, span_lint, span_lint_and_note,
-};
+use clippy_utils::diagnostics::{span_lint, span_lint_and_help, span_lint_and_note};
+use clippy_utils::source::first_line_of_span;
+use clippy_utils::ty::{implements_trait, is_type_diagnostic_item};
+use clippy_utils::{is_entrypoint_fn, is_expn_of, match_panic_def_id, method_chain_args, return_ty};
 use if_chain::if_chain;
 use itertools::Itertools;
 use rustc_ast::ast::{Async, AttrKind, Attribute, FnKind, FnRetTy, ItemKind};
@@ -12,7 +12,7 @@ use rustc_errors::emitter::EmitterWriter;
 use rustc_errors::Handler;
 use rustc_hir as hir;
 use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
-use rustc_hir::{Expr, ExprKind, QPath};
+use rustc_hir::{AnonConst, Expr, ExprKind, QPath};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::map::Map;
 use rustc_middle::lint::in_external_macro;
@@ -21,31 +21,37 @@ use rustc_parse::maybe_new_parser_from_source_str;
 use rustc_parse::parser::ForceCollect;
 use rustc_session::parse::ParseSess;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
+use rustc_span::def_id::LocalDefId;
 use rustc_span::edition::Edition;
 use rustc_span::source_map::{BytePos, FilePathMapping, MultiSpan, SourceMap, Span};
 use rustc_span::{sym, FileName, Pos};
 use std::io;
 use std::ops::Range;
+use std::thread;
 use url::Url;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for the presence of `_`, `::` or camel-case words
+    /// ### What it does
+    /// Checks for the presence of `_`, `::` or camel-case words
     /// outside ticks in documentation.
     ///
-    /// **Why is this bad?** *Rustdoc* supports markdown formatting, `_`, `::` and
+    /// ### Why is this bad?
+    /// *Rustdoc* supports markdown formatting, `_`, `::` and
     /// camel-case probably indicates some code which should be included between
     /// ticks. `_` can also be used for emphasis in markdown, this lint tries to
     /// consider that.
     ///
-    /// **Known problems:** Lots of bad docs won’t be fixed, what the lint checks
-    /// for is limited, and there are still false positives.
+    /// ### Known problems
+    /// Lots of bad docs won’t be fixed, what the lint checks
+    /// for is limited, and there are still false positives. HTML elements and their
+    /// content are not linted.
     ///
     /// In addition, when writing documentation comments, including `[]` brackets
     /// inside a link text would trip the parser. Therfore, documenting link with
     /// `[`SmallVec<[T; INLINE_CAPACITY]>`]` and then [`SmallVec<[T; INLINE_CAPACITY]>`]: SmallVec
     /// would fail.
     ///
-    /// **Examples:**
+    /// ### Examples
     /// ```rust
     /// /// Do something with the foo_bar parameter. See also
     /// /// that::other::module::foo.
@@ -66,15 +72,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for the doc comments of publicly visible
+    /// ### What it does
+    /// Checks for the doc comments of publicly visible
     /// unsafe functions and warns if there is no `# Safety` section.
     ///
-    /// **Why is this bad?** Unsafe functions should document their safety
+    /// ### Why is this bad?
+    /// Unsafe functions should document their safety
     /// preconditions, so that users can be sure they are using them safely.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Examples:**
+    /// ### Examples
     /// ```rust
     ///# type Universe = ();
     /// /// This function should really be documented
@@ -100,16 +106,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks the doc comments of publicly visible functions that
+    /// ### What it does
+    /// Checks the doc comments of publicly visible functions that
     /// return a `Result` type and warns if there is no `# Errors` section.
     ///
-    /// **Why is this bad?** Documenting the type of errors that can be returned from a
+    /// ### Why is this bad?
+    /// Documenting the type of errors that can be returned from a
     /// function can help callers write code to handle the errors appropriately.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Examples:**
-    ///
+    /// ### Examples
     /// Since the following function returns a `Result` it has an `# Errors` section in
     /// its doc comment:
     ///
@@ -129,16 +134,15 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks the doc comments of publicly visible functions that
+    /// ### What it does
+    /// Checks the doc comments of publicly visible functions that
     /// may panic and warns if there is no `# Panics` section.
     ///
-    /// **Why is this bad?** Documenting the scenarios in which panicking occurs
+    /// ### Why is this bad?
+    /// Documenting the scenarios in which panicking occurs
     /// can help callers who do not want to panic to avoid those situations.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Examples:**
-    ///
+    /// ### Examples
     /// Since the following function may panic it has a `# Panics` section in
     /// its doc comment:
     ///
@@ -160,14 +164,14 @@ declare_clippy_lint! {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `fn main() { .. }` in doctests
+    /// ### What it does
+    /// Checks for `fn main() { .. }` in doctests
     ///
-    /// **Why is this bad?** The test can be shorter (and likely more readable)
+    /// ### Why is this bad?
+    /// The test can be shorter (and likely more readable)
     /// if the `fn main()` is left implicit.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Examples:**
+    /// ### Examples
     /// ``````rust
     /// /// An example of a doctest with a `main()` function
     /// ///
@@ -226,15 +230,7 @@ impl<'tcx> LateLintPass<'tcx> for DocMarkdown {
                         panic_span: None,
                     };
                     fpu.visit_expr(&body.value);
-                    lint_for_missing_headers(
-                        cx,
-                        item.hir_id(),
-                        item.span,
-                        sig,
-                        headers,
-                        Some(body_id),
-                        fpu.panic_span,
-                    );
+                    lint_for_missing_headers(cx, item.def_id, item.span, sig, headers, Some(body_id), fpu.panic_span);
                 }
             },
             hir::ItemKind::Impl(ref impl_) => {
@@ -255,7 +251,7 @@ impl<'tcx> LateLintPass<'tcx> for DocMarkdown {
         let headers = check_attrs(cx, &self.valid_idents, attrs);
         if let hir::TraitItemKind::Fn(ref sig, ..) = item.kind {
             if !in_external_macro(cx.tcx.sess, item.span) {
-                lint_for_missing_headers(cx, item.hir_id(), item.span, sig, headers, None, None);
+                lint_for_missing_headers(cx, item.def_id, item.span, sig, headers, None, None);
             }
         }
     }
@@ -274,29 +270,21 @@ impl<'tcx> LateLintPass<'tcx> for DocMarkdown {
                 panic_span: None,
             };
             fpu.visit_expr(&body.value);
-            lint_for_missing_headers(
-                cx,
-                item.hir_id(),
-                item.span,
-                sig,
-                headers,
-                Some(body_id),
-                fpu.panic_span,
-            );
+            lint_for_missing_headers(cx, item.def_id, item.span, sig, headers, Some(body_id), fpu.panic_span);
         }
     }
 }
 
 fn lint_for_missing_headers<'tcx>(
     cx: &LateContext<'tcx>,
-    hir_id: hir::HirId,
+    def_id: LocalDefId,
     span: impl Into<MultiSpan> + Copy,
     sig: &hir::FnSig<'_>,
     headers: DocHeaders,
     body_id: Option<hir::BodyId>,
     panic_span: Option<Span>,
 ) {
-    if !cx.access_levels.is_exported(hir_id) {
+    if !cx.access_levels.is_exported(def_id) {
         return; // Private functions do not require doc comments
     }
     if !headers.safety && sig.header.unsafety == hir::Unsafety::Unsafe {
@@ -318,6 +306,7 @@ fn lint_for_missing_headers<'tcx>(
         );
     }
     if !headers.errors {
+        let hir_id = cx.tcx.hir().local_def_id_to_hir_id(def_id);
         if is_type_diagnostic_item(cx, return_ty(cx, hir_id), sym::result_type) {
             span_lint(
                 cx,
@@ -384,7 +373,7 @@ pub fn strip_doc_comment_decoration(doc: &str, comment_kind: CommentKind, span: 
     let mut no_stars = String::with_capacity(doc.len());
     for line in doc.lines() {
         let mut chars = line.chars();
-        while let Some(c) = chars.next() {
+        for c in &mut chars {
             if c.is_whitespace() {
                 no_stars.push(c);
             } else {
@@ -470,11 +459,11 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
     spans: &[(usize, Span)],
 ) -> DocHeaders {
     // true if a safety header was found
-    use pulldown_cmark::CodeBlockKind;
     use pulldown_cmark::Event::{
         Code, End, FootnoteReference, HardBreak, Html, Rule, SoftBreak, Start, TaskListMarker, Text,
     };
-    use pulldown_cmark::Tag::{CodeBlock, Heading, Link};
+    use pulldown_cmark::Tag::{CodeBlock, Heading, Item, Link, Paragraph};
+    use pulldown_cmark::{CodeBlockKind, CowStr};
 
     let mut headers = DocHeaders {
         safety: false,
@@ -486,6 +475,9 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
     let mut in_heading = false;
     let mut is_rust = false;
     let mut edition = None;
+    let mut ticks_unbalanced = false;
+    let mut text_to_check: Vec<(CowStr<'_>, Span)> = Vec::new();
+    let mut paragraph_span = spans.get(0).expect("function isn't called if doc comment is empty").1;
     for (event, range) in events {
         match event {
             Start(CodeBlock(ref kind)) => {
@@ -511,13 +503,42 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
             },
             Start(Link(_, url, _)) => in_link = Some(url),
             End(Link(..)) => in_link = None,
-            Start(Heading(_)) => in_heading = true,
-            End(Heading(_)) => in_heading = false,
+            Start(Heading(_) | Paragraph | Item) => {
+                if let Start(Heading(_)) = event {
+                    in_heading = true;
+                }
+                ticks_unbalanced = false;
+                let (_, span) = get_current_span(spans, range.start);
+                paragraph_span = first_line_of_span(cx, span);
+            },
+            End(Heading(_) | Paragraph | Item) => {
+                if let End(Heading(_)) = event {
+                    in_heading = false;
+                }
+                if ticks_unbalanced {
+                    span_lint_and_help(
+                        cx,
+                        DOC_MARKDOWN,
+                        paragraph_span,
+                        "backticks are unbalanced",
+                        None,
+                        "a backtick may be missing a pair",
+                    );
+                } else {
+                    for (text, span) in text_to_check {
+                        check_text(cx, valid_idents, &text, span);
+                    }
+                }
+                text_to_check = Vec::new();
+            },
             Start(_tag) | End(_tag) => (), // We don't care about other tags
             Html(_html) => (),             // HTML is weird, just ignore it
             SoftBreak | HardBreak | TaskListMarker(_) | Code(_) | Rule => (),
             FootnoteReference(text) | Text(text) => {
-                if Some(&text) == in_link.as_ref() {
+                let (begin, span) = get_current_span(spans, range.start);
+                paragraph_span = paragraph_span.with_hi(span.hi());
+                ticks_unbalanced |= text.contains('`') && !in_code;
+                if Some(&text) == in_link.as_ref() || ticks_unbalanced {
                     // Probably a link of the form `<http://example.com>`
                     // Which are represented as a link to "http://example.com" with
                     // text "http://example.com" by pulldown-cmark
@@ -526,11 +547,6 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                 headers.safety |= in_heading && text.trim() == "Safety";
                 headers.errors |= in_heading && text.trim() == "Errors";
                 headers.panics |= in_heading && text.trim() == "Panics";
-                let index = match spans.binary_search_by(|c| c.0.cmp(&range.start)) {
-                    Ok(o) => o,
-                    Err(e) => e - 1,
-                };
-                let (begin, span) = spans[index];
                 if in_code {
                     if is_rust {
                         let edition = edition.unwrap_or_else(|| cx.tcx.sess.edition());
@@ -539,8 +555,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                 } else {
                     // Adjust for the beginning of the current `Event`
                     let span = span.with_lo(span.lo() + BytePos::from_usize(range.start - begin));
-
-                    check_text(cx, valid_idents, &text, span);
+                    text_to_check.push((text, span));
                 }
             },
         }
@@ -548,18 +563,26 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
     headers
 }
 
+fn get_current_span(spans: &[(usize, Span)], idx: usize) -> (usize, Span) {
+    let index = match spans.binary_search_by(|c| c.0.cmp(&idx)) {
+        Ok(o) => o,
+        Err(e) => e - 1,
+    };
+    spans[index]
+}
+
 fn check_code(cx: &LateContext<'_>, text: &str, edition: Edition, span: Span) {
-    fn has_needless_main(code: &str, edition: Edition) -> bool {
+    fn has_needless_main(code: String, edition: Edition) -> bool {
         rustc_driver::catch_fatal_errors(|| {
-            rustc_span::with_session_globals(edition, || {
-                let filename = FileName::anon_source_code(code);
+            rustc_span::create_session_globals_then(edition, || {
+                let filename = FileName::anon_source_code(&code);
 
                 let sm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-                let emitter = EmitterWriter::new(box io::sink(), None, false, false, false, None, false);
-                let handler = Handler::with_emitter(false, None, box emitter);
+                let emitter = EmitterWriter::new(Box::new(io::sink()), None, false, false, false, None, false);
+                let handler = Handler::with_emitter(false, None, Box::new(emitter));
                 let sess = ParseSess::with_span_handler(handler, sm);
 
-                let mut parser = match maybe_new_parser_from_source_str(&sess, filename, code.into()) {
+                let mut parser = match maybe_new_parser_from_source_str(&sess, filename, code) {
                     Ok(p) => p,
                     Err(errs) => {
                         for mut err in errs {
@@ -584,7 +607,7 @@ fn check_code(cx: &LateContext<'_>, text: &str, edition: Edition, span: Span) {
                                 let returns_nothing = match &sig.decl.output {
                                     FnRetTy::Default(..) => true,
                                     FnRetTy::Ty(ty) if ty.kind.is_unit() => true,
-                                    _ => false,
+                                    FnRetTy::Ty(_) => false,
                                 };
 
                                 if returns_nothing && !is_async && !block.stmts.is_empty() {
@@ -614,7 +637,13 @@ fn check_code(cx: &LateContext<'_>, text: &str, edition: Edition, span: Span) {
         .unwrap_or_default()
     }
 
-    if has_needless_main(text, edition) {
+    // Because of the global session, we need to create a new session in a different thread with
+    // the edition we need.
+    let text = text.to_owned();
+    if thread::spawn(move || has_needless_main(text, edition))
+        .join()
+        .expect("thread::spawn failed")
+    {
         span_lint(cx, NEEDLESS_DOCTEST_MAIN, span, "needless `fn main` in doctest");
     }
 }
@@ -636,6 +665,7 @@ fn check_text(cx: &LateContext<'_>, valid_idents: &FxHashSet<String>, text: &str
             span.lo() + BytePos::from_usize(offset),
             span.lo() + BytePos::from_usize(offset + word.len()),
             span.ctxt(),
+            span.parent(),
         );
 
         check_word(cx, word, span);
@@ -711,14 +741,20 @@ impl<'a, 'tcx> Visitor<'tcx> for FindPanicUnwrap<'a, 'tcx> {
 
         // check for `begin_panic`
         if_chain! {
-            if let ExprKind::Call(ref func_expr, _) = expr.kind;
-            if let ExprKind::Path(QPath::Resolved(_, ref path)) = func_expr.kind;
+            if let ExprKind::Call(func_expr, _) = expr.kind;
+            if let ExprKind::Path(QPath::Resolved(_, path)) = func_expr.kind;
             if let Some(path_def_id) = path.res.opt_def_id();
             if match_panic_def_id(self.cx, path_def_id);
             if is_expn_of(expr.span, "unreachable").is_none();
+            if !is_expn_of_debug_assertions(expr.span);
             then {
                 self.panic_span = Some(expr.span);
             }
+        }
+
+        // check for `assert_eq` or `assert_ne`
+        if is_expn_of(expr.span, "assert_eq").is_some() || is_expn_of(expr.span, "assert_ne").is_some() {
+            self.panic_span = Some(expr.span);
         }
 
         // check for `unwrap`
@@ -735,7 +771,15 @@ impl<'a, 'tcx> Visitor<'tcx> for FindPanicUnwrap<'a, 'tcx> {
         intravisit::walk_expr(self, expr);
     }
 
+    // Panics in const blocks will cause compilation to fail.
+    fn visit_anon_const(&mut self, _: &'tcx AnonConst) {}
+
     fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
         NestedVisitorMap::OnlyBodies(self.cx.tcx.hir())
     }
+}
+
+fn is_expn_of_debug_assertions(span: Span) -> bool {
+    const MACRO_NAMES: &[&str] = &["debug_assert", "debug_assert_eq", "debug_assert_ne"];
+    MACRO_NAMES.iter().any(|name| is_expn_of(span, name).is_some())
 }

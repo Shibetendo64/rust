@@ -3,8 +3,8 @@ use Position::*;
 
 use rustc_ast as ast;
 use rustc_ast::ptr::P;
-use rustc_ast::token;
 use rustc_ast::tokenstream::TokenStream;
+use rustc_ast::{token, BlockCheckMode, UnsafeSource};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_errors::{pluralize, Applicability, DiagnosticBuilder};
 use rustc_expand::base::{self, *};
@@ -164,23 +164,22 @@ fn parse_args<'a>(
                 p.clear_expected_tokens();
             }
 
-            // `Parser::expect` tries to recover using the
-            // `Parser::unexpected_try_recover` function. This function is able
-            // to recover if the expected token is a closing delimiter.
-            //
-            // As `,` is not a closing delimiter, it will always return an `Err`
-            // variant.
-            let mut err = p.expect(&token::Comma).unwrap_err();
-
-            match token::TokenKind::Comma.similar_tokens() {
-                Some(tks) if tks.contains(&p.token.kind) => {
-                    // If a similar token is found, then it may be a typo. We
-                    // consider it as a comma, and continue parsing.
-                    err.emit();
-                    p.bump();
+            match p.expect(&token::Comma) {
+                Err(mut err) => {
+                    match token::TokenKind::Comma.similar_tokens() {
+                        Some(tks) if tks.contains(&p.token.kind) => {
+                            // If a similar token is found, then it may be a typo. We
+                            // consider it as a comma, and continue parsing.
+                            err.emit();
+                            p.bump();
+                        }
+                        // Otherwise stop the parsing and return the error.
+                        _ => return Err(err),
+                    }
                 }
-                // Otherwise stop the parsing and return the error.
-                _ => return Err(err),
+                Ok(recovered) => {
+                    assert!(recovered);
+                }
             }
         }
         first = false;
@@ -838,12 +837,14 @@ impl<'a, 'b> Context<'a, 'b> {
         //
         // But the nested match expression is proved to perform not as well
         // as series of let's; the first approach does.
-        let pat = self.ecx.pat_tuple(self.macsp, pats);
-        let arm = self.ecx.arm(self.macsp, pat, args_array);
-        let head = self.ecx.expr(self.macsp, ast::ExprKind::Tup(heads));
-        let result = self.ecx.expr_match(self.macsp, head, vec![arm]);
+        let args_match = {
+            let pat = self.ecx.pat_tuple(self.macsp, pats);
+            let arm = self.ecx.arm(self.macsp, pat, args_array);
+            let head = self.ecx.expr(self.macsp, ast::ExprKind::Tup(heads));
+            self.ecx.expr_match(self.macsp, head, vec![arm])
+        };
 
-        let args_slice = self.ecx.expr_addr_of(self.macsp, result);
+        let args_slice = self.ecx.expr_addr_of(self.macsp, args_match);
 
         // Now create the fmt::Arguments struct with all our locals we created.
         let (fn_name, fn_args) = if self.all_pieces_simple {
@@ -853,7 +854,18 @@ impl<'a, 'b> Context<'a, 'b> {
             // nonstandard placeholders, if there are any.
             let fmt = self.ecx.expr_vec_slice(self.macsp, self.pieces);
 
-            ("new_v1_formatted", vec![pieces, args_slice, fmt])
+            let path = self.ecx.std_path(&[sym::fmt, sym::UnsafeArg, sym::new]);
+            let unsafe_arg = self.ecx.expr_call_global(self.macsp, path, Vec::new());
+            let unsafe_expr = self.ecx.expr_block(P(ast::Block {
+                stmts: vec![self.ecx.stmt_expr(unsafe_arg)],
+                id: ast::DUMMY_NODE_ID,
+                rules: BlockCheckMode::Unsafe(UnsafeSource::CompilerGenerated),
+                span: self.macsp,
+                tokens: None,
+                could_be_bare_literal: false,
+            }));
+
+            ("new_v1_formatted", vec![pieces, args_slice, fmt, unsafe_expr])
         };
 
         let path = self.ecx.std_path(&[sym::fmt, sym::Arguments, Symbol::intern(fn_name)]);
@@ -939,6 +951,7 @@ pub fn expand_preparsed_format_args(
 
     let msg = "format argument must be a string literal";
     let fmt_sp = efmt.span;
+    let efmt_kind_is_lit: bool = matches!(efmt.kind, ast::ExprKind::Lit(_));
     let (fmt_str, fmt_style, fmt_span) = match expr_to_spanned_string(ecx, efmt, msg) {
         Ok(mut fmt) if append_newline => {
             fmt.0 = Symbol::intern(&format!("{}\n", fmt.0));
@@ -946,17 +959,19 @@ pub fn expand_preparsed_format_args(
         }
         Ok(fmt) => fmt,
         Err(err) => {
-            if let Some(mut err) = err {
+            if let Some((mut err, suggested)) = err {
                 let sugg_fmt = match args.len() {
                     0 => "{}".to_string(),
                     _ => format!("{}{{}}", "{} ".repeat(args.len())),
                 };
-                err.span_suggestion(
-                    fmt_sp.shrink_to_lo(),
-                    "you might be missing a string literal to format with",
-                    format!("\"{}\", ", sugg_fmt),
-                    Applicability::MaybeIncorrect,
-                );
+                if !suggested {
+                    err.span_suggestion(
+                        fmt_sp.shrink_to_lo(),
+                        "you might be missing a string literal to format with",
+                        format!("\"{}\", ", sugg_fmt),
+                        Applicability::MaybeIncorrect,
+                    );
+                }
                 err.emit();
             }
             return DummyResult::raw_expr(sp, true);
@@ -989,7 +1004,19 @@ pub fn expand_preparsed_format_args(
 
     if !parser.errors.is_empty() {
         let err = parser.errors.remove(0);
-        let sp = fmt_span.from_inner(err.span);
+        let sp = if efmt_kind_is_lit {
+            fmt_span.from_inner(err.span)
+        } else {
+            // The format string could be another macro invocation, e.g.:
+            //     format!(concat!("abc", "{}"), 4);
+            // However, `err.span` is an inner span relative to the *result* of
+            // the macro invocation, which is why we would get a nonsensical
+            // result calling `fmt_span.from_inner(err.span)` as above, and
+            // might even end up inside a multibyte character (issue #86085).
+            // Therefore, we conservatively report the error for the entire
+            // argument span here.
+            fmt_span
+        };
         let mut e = ecx.struct_span_err(sp, &format!("invalid format string: {}", err.description));
         e.span_label(sp, err.label + " in format string");
         if let Some(note) = err.note {

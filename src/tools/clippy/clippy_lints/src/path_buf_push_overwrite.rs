@@ -1,4 +1,5 @@
-use crate::utils::{is_type_diagnostic_item, span_lint_and_sugg};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::ty::is_type_diagnostic_item;
 use if_chain::if_chain;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
@@ -9,15 +10,15 @@ use rustc_span::symbol::sym;
 use std::path::{Component, Path};
 
 declare_clippy_lint! {
-    /// **What it does:*** Checks for [push](https://doc.rust-lang.org/std/path/struct.PathBuf.html#method.push)
+    /// ### What it does
+    ///* Checks for [push](https://doc.rust-lang.org/std/path/struct.PathBuf.html#method.push)
     /// calls on `PathBuf` that can cause overwrites.
     ///
-    /// **Why is this bad?** Calling `push` with a root path at the start can overwrite the
+    /// ### Why is this bad?
+    /// Calling `push` with a root path at the start can overwrite the
     /// previous defined path.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// use std::path::PathBuf;
     ///
@@ -44,7 +45,7 @@ declare_lint_pass!(PathBufPushOverwrite => [PATH_BUF_PUSH_OVERWRITE]);
 impl<'tcx> LateLintPass<'tcx> for PathBufPushOverwrite {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if_chain! {
-            if let ExprKind::MethodCall(ref path, _, ref args, _) = expr.kind;
+            if let ExprKind::MethodCall(path, _, args, _) = expr.kind;
             if path.ident.name == sym!(push);
             if args.len() == 2;
             if is_type_diagnostic_item(cx, cx.typeck_results().expr_ty(&args[0]).peel_refs(), sym::PathBuf);

@@ -11,7 +11,7 @@ LL | fn foo() -> Foo {
    | ^^^^^^^^^^^^^^^
 
 error: concrete type differs from previous defining opaque type use
-  --> $DIR/different_defining_uses_never_type.rs:16:1
+  --> $DIR/different_defining_uses_never_type.rs:17:1
    |
 LL | fn boo() -> Foo {
    | ^^^^^^^^^^^^^^^ expected `&'static str`, got `()`

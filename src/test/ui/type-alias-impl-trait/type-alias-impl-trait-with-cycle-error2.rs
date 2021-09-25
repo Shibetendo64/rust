@@ -11,6 +11,4 @@ fn crash(x: Foo) -> Foo {
     x
 }
 
-fn main() {
-
-}
+fn main() {}

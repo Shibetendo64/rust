@@ -49,124 +49,135 @@
 //
 // This cfg won't affect doc tests.
 #![cfg(not(test))]
+// To run libcore tests without x.py without ending up with two copies of libcore, Miri needs to be
+// able to "empty" this crate. See <https://github.com/rust-lang/miri-test-libstd/issues/4>.
+// rustc itself never sets the feature, so this line has no affect there.
+#![cfg(any(not(feature = "miri-test-libstd"), test, doctest))]
 #![stable(feature = "core", since = "1.6.0")]
 #![doc(
-    html_root_url = "https://doc.rust-lang.org/nightly/",
     html_playground_url = "https://play.rust-lang.org/",
     issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
     test(no_crate_inject, attr(deny(warnings))),
     test(attr(allow(dead_code, deprecated, unused_variables, unused_mut)))
 )]
 #![no_core]
+//
+// Lints:
+#![deny(rust_2021_incompatible_or_patterns)]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![warn(deprecated_in_future)]
-#![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
+#![warn(missing_docs)]
 #![allow(explicit_outlives_requirements)]
-#![feature(rustc_allow_const_fn_unstable)]
-#![feature(allow_internal_unstable)]
-#![feature(arbitrary_self_types)]
-#![feature(asm)]
-#![feature(cfg_target_has_atomic)]
-#![feature(const_heap)]
+//
+// Library features for const fns:
+#![feature(const_align_of_val)]
 #![feature(const_alloc_layout)]
+#![feature(const_arguments_as_str)]
 #![feature(const_assert_type)]
-#![feature(const_discriminant)]
+#![feature(const_bigint_helper_methods)]
+#![feature(const_caller_location)]
 #![feature(const_cell_into_inner)]
+#![feature(const_discriminant)]
+#![feature(const_float_bits_conv)]
+#![feature(const_float_classify)]
+#![feature(const_heap)]
+#![feature(const_inherent_unchecked_arith)]
+#![feature(const_int_unchecked_arith)]
 #![feature(const_intrinsic_copy)]
 #![feature(const_intrinsic_forget)]
-#![feature(const_float_classify)]
-#![feature(const_float_bits_conv)]
-#![feature(const_int_unchecked_arith)]
-#![feature(const_mut_refs)]
-#![feature(const_refs_to_cell)]
-#![feature(const_cttz)]
-#![feature(const_panic)]
-#![feature(const_pin)]
-#![feature(const_fn)]
-#![feature(const_fn_union)]
-#![feature(const_impl_trait)]
-#![feature(const_fn_floating_point_arithmetic)]
-#![feature(const_fn_fn_ptr_basics)]
+#![feature(const_likely)]
+#![feature(const_maybe_uninit_as_ptr)]
+#![feature(const_maybe_uninit_assume_init)]
 #![feature(const_option)]
-#![feature(const_precise_live_drops)]
+#![feature(const_pin)]
 #![feature(const_ptr_offset)]
 #![feature(const_ptr_offset_from)]
 #![feature(const_ptr_read)]
 #![feature(const_ptr_write)]
 #![feature(const_raw_ptr_comparison)]
-#![feature(const_raw_ptr_deref)]
+#![feature(const_size_of_val)]
 #![feature(const_slice_from_raw_parts)]
 #![feature(const_slice_ptr_len)]
-#![feature(const_size_of_val)]
-#![feature(const_align_of_val)]
+#![feature(const_swap)]
+#![feature(const_trait_impl)]
 #![feature(const_type_id)]
 #![feature(const_type_name)]
-#![feature(const_likely)]
 #![feature(const_unreachable_unchecked)]
-#![feature(const_maybe_uninit_assume_init)]
-#![feature(const_maybe_uninit_as_ptr)]
-#![feature(custom_inner_attributes)]
+#![feature(const_default_impls)]
+#![feature(duration_consts_2)]
+#![feature(ptr_metadata)]
+#![feature(slice_ptr_get)]
+#![feature(variant_count)]
+//
+// Language features:
+#![feature(abi_unadjusted)]
+#![feature(allow_internal_unsafe)]
+#![feature(allow_internal_unstable)]
+#![feature(asm)]
+#![feature(associated_type_bounds)]
+#![feature(auto_traits)]
+#![feature(cfg_target_has_atomic)]
+#![feature(const_fn_floating_point_arithmetic)]
+#![feature(const_fn_fn_ptr_basics)]
+#![feature(const_fn_trait_bound)]
+#![feature(const_impl_trait)]
+#![feature(const_mut_refs)]
+#![feature(const_panic)]
+#![feature(const_precise_live_drops)]
+#![feature(const_raw_ptr_deref)]
+#![feature(const_refs_to_cell)]
 #![feature(decl_macro)]
 #![feature(doc_cfg)]
-#![feature(doc_spotlight)]
-#![feature(duration_consts_2)]
-#![feature(duration_saturating_ops)]
-#![feature(extended_key_value_attributes)]
+#![feature(doc_notable_trait)]
+#![feature(doc_primitive)]
+#![feature(exhaustive_patterns)]
 #![feature(extern_types)]
 #![feature(fundamental)]
+#![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(llvm_asm)]
+#![feature(min_specialization)]
 #![feature(negative_impls)]
 #![feature(never_type)]
-#![feature(nll)]
-#![feature(exhaustive_patterns)]
 #![feature(no_core)]
-#![feature(auto_traits)]
-#![feature(or_patterns)]
+#![feature(no_coverage)] // rust-lang/rust#84605
+#![feature(no_niche)] // rust-lang/rust#68303
+#![feature(platform_intrinsics)]
 #![feature(prelude_import)]
-#![cfg_attr(not(bootstrap), feature(ptr_metadata))]
-#![feature(repr_simd, platform_intrinsics)]
+#![feature(repr_simd)]
+#![feature(rustc_allow_const_fn_unstable)]
 #![feature(rustc_attrs)]
 #![feature(simd_ffi)]
-#![feature(min_specialization)]
 #![feature(staged_api)]
-#![feature(std_internals)]
 #![feature(stmt_expr_attributes)]
-#![feature(str_split_as_str)]
-#![feature(str_split_inclusive_as_str)]
 #![feature(trait_alias)]
 #![feature(transparent_unions)]
 #![feature(try_blocks)]
 #![feature(unboxed_closures)]
 #![feature(unsized_fn_params)]
-#![feature(unwind_attributes)]
-#![feature(variant_count)]
-#![feature(tbm_target_feature)]
-#![feature(sse4a_target_feature)]
-#![feature(arm_target_feature)]
-#![feature(powerpc_target_feature)]
-#![feature(mips_target_feature)]
+//
+// Target features:
 #![feature(aarch64_target_feature)]
-#![feature(wasm_target_feature)]
+#![feature(adx_target_feature)]
+#![feature(arm_target_feature)]
 #![feature(avx512_target_feature)]
 #![feature(cmpxchg16b_target_feature)]
-#![feature(rtm_target_feature)]
 #![feature(f16c_target_feature)]
 #![feature(hexagon_target_feature)]
-#![feature(const_fn_transmute)]
-#![feature(abi_unadjusted)]
-#![feature(adx_target_feature)]
-#![feature(external_doc)]
-#![feature(associated_type_bounds)]
-#![feature(const_caller_location)]
-#![feature(slice_ptr_get)]
-#![feature(no_niche)] // rust-lang/rust#68303
-#![feature(int_error_matching)]
-#![cfg_attr(bootstrap, feature(unsafe_block_in_unsafe_fn))]
-#![deny(unsafe_op_in_unsafe_fn)]
+#![feature(mips_target_feature)]
+#![feature(powerpc_target_feature)]
+#![feature(rtm_target_feature)]
+#![feature(sse4a_target_feature)]
+#![feature(tbm_target_feature)]
+#![feature(wasm_target_feature)]
+
+// allow using `core::` in intra-doc links
+#[allow(unused_extern_crates)]
+extern crate self as core;
 
 #[prelude_import]
 #[allow(unused)]
@@ -175,6 +186,16 @@ use prelude::v1::*;
 #[cfg(not(test))] // See #65860
 #[macro_use]
 mod macros;
+
+// We don't export this through #[macro_export] for now, to avoid breakage.
+// See https://github.com/rust-lang/rust/issues/82913
+#[cfg(not(test))]
+#[unstable(feature = "assert_matches", issue = "82775")]
+/// Unstable module containing the unstable `assert_matches` macro.
+pub mod assert_matches {
+    #[unstable(feature = "assert_matches", issue = "82775")]
+    pub use crate::macros::{assert_matches, debug_assert_matches};
+}
 
 #[macro_use]
 mod internal_macros;
@@ -253,7 +274,6 @@ pub mod option;
 pub mod panic;
 pub mod panicking;
 pub mod pin;
-pub mod raw;
 pub mod result;
 #[unstable(feature = "async_stream", issue = "79024")]
 pub mod stream;
@@ -297,13 +317,44 @@ pub mod primitive;
     unused_imports,
     unsafe_op_in_unsafe_fn
 )]
-#[cfg_attr(bootstrap, allow(non_autolinks))]
-#[cfg_attr(not(bootstrap), allow(rustdoc::non_autolinks))]
+#[allow(rustdoc::bare_urls)]
 // FIXME: This annotation should be moved into rust-lang/stdarch after clashing_extern_declarations is
 // merged. It currently cannot because bootstrap fails as the lint hasn't been defined yet.
 #[allow(clashing_extern_declarations)]
 #[unstable(feature = "stdsimd", issue = "48556")]
 mod core_arch;
 
+#[doc = include_str!("../../stdarch/crates/core_arch/src/core_arch_docs.md")]
 #[stable(feature = "simd_arch", since = "1.27.0")]
-pub use core_arch::arch;
+pub mod arch {
+    #[stable(feature = "simd_arch", since = "1.27.0")]
+    pub use crate::core_arch::arch::*;
+
+    /// Inline assembly.
+    ///
+    /// Read the [unstable book] for the usage.
+    ///
+    /// [unstable book]: ../../unstable-book/library-features/asm.html
+    #[unstable(
+        feature = "asm",
+        issue = "72016",
+        reason = "inline assembly is not stable enough for use and is subject to change"
+    )]
+    #[rustc_builtin_macro]
+    pub macro asm("assembly template", $(operands,)* $(options($(option),*))?) {
+        /* compiler built-in */
+    }
+
+    /// Module-level inline assembly.
+    #[unstable(
+        feature = "global_asm",
+        issue = "35119",
+        reason = "`global_asm!` is not stable enough for use and is subject to change"
+    )]
+    #[rustc_builtin_macro]
+    pub macro global_asm("assembly template", $(operands,)* $(options($(option),*))?) {
+        /* compiler built-in */
+    }
+}
+
+include!("primitive_docs.rs");

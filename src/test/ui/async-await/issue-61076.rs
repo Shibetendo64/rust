@@ -42,7 +42,7 @@ async fn bar() -> Result<(), ()> {
     foo()?; //~ ERROR the `?` operator can only be applied to values that implement `Try`
     //~^ NOTE the `?` operator cannot be applied to type `impl Future`
     //~| HELP the trait `Try` is not implemented for `impl Future`
-    //~| NOTE required by `into_result`
+    //~| NOTE required by `branch`
     //~| HELP consider `await`ing on the `Future`
     //~| NOTE in this expansion of desugaring of operator `?`
     //~| NOTE in this expansion of desugaring of operator `?`
@@ -57,6 +57,8 @@ async fn struct_() -> Struct {
 
 async fn tuple() -> Tuple {
     //~^ NOTE checked the `Output` of this `async fn`, expected opaque type
+    //~| NOTE while checking the return type of the `async fn`
+    //~| NOTE in this expansion of desugaring of `async` block or function
     Tuple(1i32)
 }
 
@@ -65,7 +67,7 @@ async fn baz() -> Result<(), ()> {
     t?; //~ ERROR the `?` operator can only be applied to values that implement `Try`
     //~^ NOTE the `?` operator cannot be applied to type `T`
     //~| HELP the trait `Try` is not implemented for `T`
-    //~| NOTE required by `into_result`
+    //~| NOTE required by `branch`
     //~| HELP consider `await`ing on the `Future`
     //~| NOTE in this expansion of desugaring of operator `?`
     //~| NOTE in this expansion of desugaring of operator `?`
@@ -92,7 +94,6 @@ async fn match_() {
         Tuple(_) => {} //~ ERROR mismatched types
         //~^ NOTE expected opaque type, found struct `Tuple`
         //~| NOTE expected opaque type `impl Future`
-        //~| NOTE while checking the return type of the `async fn`
     }
 }
 

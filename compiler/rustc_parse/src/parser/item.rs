@@ -9,7 +9,7 @@ use rustc_ast::tokenstream::{DelimSpan, TokenStream, TokenTree};
 use rustc_ast::{self as ast, AttrVec, Attribute, DUMMY_NODE_ID};
 use rustc_ast::{Async, Const, Defaultness, IsAuto, Mutability, Unsafe, UseTree, UseTreeKind};
 use rustc_ast::{BindingMode, Block, FnDecl, FnSig, Param, SelfKind};
-use rustc_ast::{EnumDef, Generics, StructField, TraitRef, Ty, TyKind, Variant, VariantData};
+use rustc_ast::{EnumDef, FieldDef, Generics, TraitRef, Ty, TyKind, Variant, VariantData};
 use rustc_ast::{FnHeader, ForeignItem, Path, PathSegment, Visibility, VisibilityKind};
 use rustc_ast::{MacArgs, MacCall, MacDelimiter};
 use rustc_ast_pretty::pprust;
@@ -26,8 +26,7 @@ impl<'a> Parser<'a> {
     /// Parses a source module as a crate. This is the main entry point for the parser.
     pub fn parse_crate_mod(&mut self) -> PResult<'a, ast::Crate> {
         let (attrs, items, span) = self.parse_mod(&token::Eof)?;
-        let proc_macros = Vec::new(); // Filled in by `proc_macro_harness::inject()`.
-        Ok(ast::Crate { attrs, items, span, proc_macros })
+        Ok(ast::Crate { attrs, items, span })
     }
 
     /// Parses a `mod <foo> { ... }` or `mod <foo>;` item.
@@ -103,20 +102,11 @@ impl<'a> Parser<'a> {
         // over when we bump the parser
         if let token::Interpolated(nt) = &self.token.kind {
             if let token::NtItem(item) = &**nt {
-                let item = item.clone();
+                let mut item = item.clone();
+                self.bump();
 
-                return self.collect_tokens_trailing_token(
-                    attrs,
-                    force_collect,
-                    |this, mut attrs| {
-                        let mut item = item;
-                        mem::swap(&mut item.attrs, &mut attrs);
-                        item.attrs.extend(attrs);
-                        // Bump the parser so the we capture the token::Interpolated
-                        this.bump();
-                        Ok((Some(item.into_inner()), TrailingToken::None))
-                    },
-                );
+                attrs.prepend_to_nt_inner(&mut item.attrs);
+                return Ok(Some(item.into_inner()));
             }
         };
 
@@ -204,6 +194,7 @@ impl<'a> Parser<'a> {
         def: &mut Defaultness,
         req_name: ReqName,
     ) -> PResult<'a, Option<ItemInfo>> {
+        let def_final = def == &Defaultness::Final;
         let mut def = || mem::replace(def, Defaultness::Final);
 
         let info = if self.eat_keyword(kw::Use) {
@@ -226,10 +217,10 @@ impl<'a> Parser<'a> {
             }
 
             (Ident::invalid(), ItemKind::Use(tree))
-        } else if self.check_fn_front_matter() {
+        } else if self.check_fn_front_matter(def_final) {
             // FUNCTION ITEM
             let (ident, sig, generics, body) = self.parse_fn(attrs, req_name, lo)?;
-            (ident, ItemKind::Fn(box FnKind(def(), sig, generics, body)))
+            (ident, ItemKind::Fn(Box::new(FnKind(def(), sig, generics, body))))
         } else if self.eat_keyword(kw::Extern) {
             if self.eat_keyword(kw::Crate) {
                 // EXTERN CRATE
@@ -502,7 +493,20 @@ impl<'a> Parser<'a> {
         let ty_first = if self.token.is_keyword(kw::For) && self.look_ahead(1, |t| t != &token::Lt)
         {
             let span = self.prev_token.span.between(self.token.span);
-            self.struct_span_err(span, "missing trait in a trait impl").emit();
+            self.struct_span_err(span, "missing trait in a trait impl")
+                .span_suggestion(
+                    span,
+                    "add a trait here",
+                    " Trait ".into(),
+                    Applicability::HasPlaceholders,
+                )
+                .span_suggestion(
+                    span.to(self.token.span),
+                    "for an inherent impl, drop this `for`",
+                    "".into(),
+                    Applicability::MaybeIncorrect,
+                )
+                .emit();
             P(Ty {
                 kind: TyKind::Path(None, err_path(span)),
                 span,
@@ -529,7 +533,7 @@ impl<'a> Parser<'a> {
 
         generics.where_clause = self.parse_where_clause()?;
 
-        let impl_items = self.parse_item_list(attrs, |p| p.parse_impl_item())?;
+        let impl_items = self.parse_item_list(attrs, |p| p.parse_impl_item(ForceCollect::No))?;
 
         let item_kind = match ty_second {
             Some(ty_second) => {
@@ -556,7 +560,7 @@ impl<'a> Parser<'a> {
                 };
                 let trait_ref = TraitRef { path, ref_id: ty_first.id };
 
-                ItemKind::Impl(box ImplKind {
+                ItemKind::Impl(Box::new(ImplKind {
                     unsafety,
                     polarity,
                     defaultness,
@@ -565,11 +569,11 @@ impl<'a> Parser<'a> {
                     of_trait: Some(trait_ref),
                     self_ty: ty_second,
                     items: impl_items,
-                })
+                }))
             }
             None => {
                 // impl Type
-                ItemKind::Impl(box ImplKind {
+                ItemKind::Impl(Box::new(ImplKind {
                     unsafety,
                     polarity,
                     defaultness,
@@ -578,7 +582,7 @@ impl<'a> Parser<'a> {
                     of_trait: None,
                     self_ty: ty_first,
                     items: impl_items,
-                })
+                }))
             }
         };
 
@@ -717,22 +721,32 @@ impl<'a> Parser<'a> {
         } else {
             // It's a normal trait.
             tps.where_clause = self.parse_where_clause()?;
-            let items = self.parse_item_list(attrs, |p| p.parse_trait_item())?;
-            Ok((ident, ItemKind::Trait(box TraitKind(is_auto, unsafety, tps, bounds, items))))
+            let items = self.parse_item_list(attrs, |p| p.parse_trait_item(ForceCollect::No))?;
+            Ok((ident, ItemKind::Trait(Box::new(TraitKind(is_auto, unsafety, tps, bounds, items)))))
         }
     }
 
-    pub fn parse_impl_item(&mut self) -> PResult<'a, Option<Option<P<AssocItem>>>> {
-        self.parse_assoc_item(|_| true)
+    pub fn parse_impl_item(
+        &mut self,
+        force_collect: ForceCollect,
+    ) -> PResult<'a, Option<Option<P<AssocItem>>>> {
+        self.parse_assoc_item(|_| true, force_collect)
     }
 
-    pub fn parse_trait_item(&mut self) -> PResult<'a, Option<Option<P<AssocItem>>>> {
-        self.parse_assoc_item(|edition| edition >= Edition::Edition2018)
+    pub fn parse_trait_item(
+        &mut self,
+        force_collect: ForceCollect,
+    ) -> PResult<'a, Option<Option<P<AssocItem>>>> {
+        self.parse_assoc_item(|edition| edition >= Edition::Edition2018, force_collect)
     }
 
     /// Parses associated items.
-    fn parse_assoc_item(&mut self, req_name: ReqName) -> PResult<'a, Option<Option<P<AssocItem>>>> {
-        Ok(self.parse_item_(req_name, ForceCollect::No)?.map(
+    fn parse_assoc_item(
+        &mut self,
+        req_name: ReqName,
+        force_collect: ForceCollect,
+    ) -> PResult<'a, Option<Option<P<AssocItem>>>> {
+        Ok(self.parse_item_(req_name, force_collect)?.map(
             |Item { attrs, id, span, vis, ident, kind, tokens }| {
                 let kind = match AssocItemKind::try_from(kind) {
                     Ok(kind) => kind,
@@ -767,7 +781,7 @@ impl<'a> Parser<'a> {
         let default = if self.eat(&token::Eq) { Some(self.parse_ty()?) } else { None };
         self.expect_semi()?;
 
-        Ok((ident, ItemKind::TyAlias(box TyAliasKind(def, generics, bounds, default))))
+        Ok((ident, ItemKind::TyAlias(Box::new(TyAliasKind(def, generics, bounds, default)))))
     }
 
     /// Parses a `UseTree`.
@@ -917,14 +931,17 @@ impl<'a> Parser<'a> {
         unsafety: Unsafe,
     ) -> PResult<'a, ItemInfo> {
         let abi = self.parse_abi(); // ABI?
-        let items = self.parse_item_list(attrs, |p| p.parse_foreign_item())?;
+        let items = self.parse_item_list(attrs, |p| p.parse_foreign_item(ForceCollect::No))?;
         let module = ast::ForeignMod { unsafety, abi, items };
         Ok((Ident::invalid(), ItemKind::ForeignMod(module)))
     }
 
     /// Parses a foreign item (one in an `extern { ... }` block).
-    pub fn parse_foreign_item(&mut self) -> PResult<'a, Option<Option<P<ForeignItem>>>> {
-        Ok(self.parse_item_(|_| true, ForceCollect::No)?.map(
+    pub fn parse_foreign_item(
+        &mut self,
+        force_collect: ForceCollect,
+    ) -> PResult<'a, Option<Option<P<ForeignItem>>>> {
+        Ok(self.parse_item_(|_| true, force_collect)?.map(
             |Item { attrs, id, span, vis, ident, kind, tokens }| {
                 let kind = match ForeignItemKind::try_from(kind) {
                     Ok(kind) => kind,
@@ -1102,8 +1119,7 @@ impl<'a> Parser<'a> {
                 e
             })?;
 
-        let enum_definition =
-            EnumDef { variants: variants.into_iter().filter_map(|v| v).collect() };
+        let enum_definition = EnumDef { variants: variants.into_iter().flatten().collect() };
         Ok((id, ItemKind::Enum(enum_definition, generics)))
     }
 
@@ -1119,11 +1135,11 @@ impl<'a> Parser<'a> {
                 if !this.recover_nested_adt_item(kw::Enum)? {
                     return Ok((None, TrailingToken::None));
                 }
-                let ident = this.parse_ident()?;
+                let ident = this.parse_field_ident("enum", vlo)?;
 
                 let struct_def = if this.check(&token::OpenDelim(token::Brace)) {
                     // Parse a struct variant.
-                    let (fields, recovered) = this.parse_record_struct_body()?;
+                    let (fields, recovered) = this.parse_record_struct_body("struct")?;
                     VariantData::Struct(fields, recovered)
                 } else if this.check(&token::OpenDelim(token::Paren)) {
                     VariantData::Tuple(this.parse_tuple_struct_body()?, DUMMY_NODE_ID)
@@ -1138,7 +1154,7 @@ impl<'a> Parser<'a> {
                     ident,
                     vis,
                     id: DUMMY_NODE_ID,
-                    attrs: variant_attrs,
+                    attrs: variant_attrs.into(),
                     data: struct_def,
                     disr_expr,
                     span: vlo.to(this.prev_token.span),
@@ -1177,7 +1193,7 @@ impl<'a> Parser<'a> {
                 VariantData::Unit(DUMMY_NODE_ID)
             } else {
                 // If we see: `struct Foo<T> where T: Copy { ... }`
-                let (fields, recovered) = self.parse_record_struct_body()?;
+                let (fields, recovered) = self.parse_record_struct_body("struct")?;
                 VariantData::Struct(fields, recovered)
             }
         // No `where` so: `struct Foo<T>;`
@@ -1185,7 +1201,7 @@ impl<'a> Parser<'a> {
             VariantData::Unit(DUMMY_NODE_ID)
         // Record-style struct definition
         } else if self.token == token::OpenDelim(token::Brace) {
-            let (fields, recovered) = self.parse_record_struct_body()?;
+            let (fields, recovered) = self.parse_record_struct_body("struct")?;
             VariantData::Struct(fields, recovered)
         // Tuple-style struct definition with optional where-clause.
         } else if self.token == token::OpenDelim(token::Paren) {
@@ -1215,10 +1231,10 @@ impl<'a> Parser<'a> {
 
         let vdata = if self.token.is_keyword(kw::Where) {
             generics.where_clause = self.parse_where_clause()?;
-            let (fields, recovered) = self.parse_record_struct_body()?;
+            let (fields, recovered) = self.parse_record_struct_body("union")?;
             VariantData::Struct(fields, recovered)
         } else if self.token == token::OpenDelim(token::Brace) {
-            let (fields, recovered) = self.parse_record_struct_body()?;
+            let (fields, recovered) = self.parse_record_struct_body("union")?;
             VariantData::Struct(fields, recovered)
         } else {
             let token_str = super::token_descr(&self.token);
@@ -1233,12 +1249,13 @@ impl<'a> Parser<'a> {
 
     fn parse_record_struct_body(
         &mut self,
-    ) -> PResult<'a, (Vec<StructField>, /* recovered */ bool)> {
+        adt_ty: &str,
+    ) -> PResult<'a, (Vec<FieldDef>, /* recovered */ bool)> {
         let mut fields = Vec::new();
         let mut recovered = false;
         if self.eat(&token::OpenDelim(token::Brace)) {
             while self.token != token::CloseDelim(token::Brace) {
-                let field = self.parse_struct_decl_field().map_err(|e| {
+                let field = self.parse_field_def(adt_ty).map_err(|e| {
                     self.consume_block(token::Brace, ConsumeClosingDelim::No);
                     recovered = true;
                     e
@@ -1263,7 +1280,7 @@ impl<'a> Parser<'a> {
         Ok((fields, recovered))
     }
 
-    fn parse_tuple_struct_body(&mut self) -> PResult<'a, Vec<StructField>> {
+    fn parse_tuple_struct_body(&mut self) -> PResult<'a, Vec<FieldDef>> {
         // This is the case where we find `struct Foo<T>(T) where T: Copy;`
         // Unit like structs are handled in parse_item_struct function
         self.parse_paren_comma_seq(|p| {
@@ -1274,13 +1291,13 @@ impl<'a> Parser<'a> {
                 let ty = p.parse_ty()?;
 
                 Ok((
-                    StructField {
+                    FieldDef {
                         span: lo.to(ty.span),
                         vis,
                         ident: None,
                         id: DUMMY_NODE_ID,
                         ty,
-                        attrs,
+                        attrs: attrs.into(),
                         is_placeholder: false,
                     },
                     TrailingToken::MaybeComma,
@@ -1291,24 +1308,25 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses an element of a struct declaration.
-    fn parse_struct_decl_field(&mut self) -> PResult<'a, StructField> {
+    fn parse_field_def(&mut self, adt_ty: &str) -> PResult<'a, FieldDef> {
         let attrs = self.parse_outer_attributes()?;
         self.collect_tokens_trailing_token(attrs, ForceCollect::No, |this, attrs| {
             let lo = this.token.span;
             let vis = this.parse_visibility(FollowedByType::No)?;
-            Ok((this.parse_single_struct_field(lo, vis, attrs)?, TrailingToken::None))
+            Ok((this.parse_single_struct_field(adt_ty, lo, vis, attrs)?, TrailingToken::None))
         })
     }
 
     /// Parses a structure field declaration.
     fn parse_single_struct_field(
         &mut self,
+        adt_ty: &str,
         lo: Span,
         vis: Visibility,
         attrs: Vec<Attribute>,
-    ) -> PResult<'a, StructField> {
+    ) -> PResult<'a, FieldDef> {
         let mut seen_comma: bool = false;
-        let a_var = self.parse_name_and_ty(lo, vis, attrs)?;
+        let a_var = self.parse_name_and_ty(adt_ty, lo, vis, attrs)?;
         if self.token == token::Comma {
             seen_comma = true;
         }
@@ -1319,7 +1337,7 @@ impl<'a> Parser<'a> {
             token::CloseDelim(token::Brace) => {}
             token::DocComment(..) => {
                 let previous_span = self.prev_token.span;
-                let mut err = self.span_fatal_err(self.token.span, Error::UselessDocComment);
+                let mut err = self.span_err(self.token.span, Error::UselessDocComment);
                 self.bump(); // consume the doc comment
                 let comma_after_doc_seen = self.eat(&token::Comma);
                 // `seen_comma` is always false, because we are inside doc block
@@ -1392,25 +1410,96 @@ impl<'a> Parser<'a> {
         Ok(a_var)
     }
 
+    fn expect_field_ty_separator(&mut self) -> PResult<'a, ()> {
+        if let Err(mut err) = self.expect(&token::Colon) {
+            let sm = self.sess.source_map();
+            let eq_typo = self.token.kind == token::Eq && self.look_ahead(1, |t| t.is_path_start());
+            let semi_typo = self.token.kind == token::Semi
+                && self.look_ahead(1, |t| {
+                    t.is_path_start()
+                    // We check that we are in a situation like `foo; bar` to avoid bad suggestions
+                    // when there's no type and `;` was used instead of a comma.
+                    && match (sm.lookup_line(self.token.span.hi()), sm.lookup_line(t.span.lo())) {
+                        (Ok(l), Ok(r)) => l.line == r.line,
+                        _ => true,
+                    }
+                });
+            if eq_typo || semi_typo {
+                self.bump();
+                // Gracefully handle small typos.
+                err.span_suggestion_short(
+                    self.prev_token.span,
+                    "field names and their types are separated with `:`",
+                    ":".to_string(),
+                    Applicability::MachineApplicable,
+                );
+                err.emit();
+            } else {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
     /// Parses a structure field.
     fn parse_name_and_ty(
         &mut self,
+        adt_ty: &str,
         lo: Span,
         vis: Visibility,
         attrs: Vec<Attribute>,
-    ) -> PResult<'a, StructField> {
-        let name = self.parse_ident_common(false)?;
-        self.expect(&token::Colon)?;
+    ) -> PResult<'a, FieldDef> {
+        let name = self.parse_field_ident(adt_ty, lo)?;
+        self.expect_field_ty_separator()?;
         let ty = self.parse_ty()?;
-        Ok(StructField {
+        if self.token.kind == token::Eq {
+            self.bump();
+            let const_expr = self.parse_anon_const_expr()?;
+            let sp = ty.span.shrink_to_hi().to(const_expr.value.span);
+            self.struct_span_err(sp, "default values on `struct` fields aren't supported")
+                .span_suggestion(
+                    sp,
+                    "remove this unsupported default value",
+                    String::new(),
+                    Applicability::MachineApplicable,
+                )
+                .emit();
+        }
+        Ok(FieldDef {
             span: lo.to(self.prev_token.span),
             ident: Some(name),
             vis,
             id: DUMMY_NODE_ID,
             ty,
-            attrs,
+            attrs: attrs.into(),
             is_placeholder: false,
         })
+    }
+
+    /// Parses a field identifier. Specialized version of `parse_ident_common`
+    /// for better diagnostics and suggestions.
+    fn parse_field_ident(&mut self, adt_ty: &str, lo: Span) -> PResult<'a, Ident> {
+        let (ident, is_raw) = self.ident_or_err()?;
+        if !is_raw && ident.is_reserved() {
+            let err = if self.check_fn_front_matter(false) {
+                // We use `parse_fn` to get a span for the function
+                if let Err(mut db) = self.parse_fn(&mut Vec::new(), |_| true, lo) {
+                    db.delay_as_bug();
+                }
+                let mut err = self.struct_span_err(
+                    lo.to(self.prev_token.span),
+                    &format!("functions are not allowed in {} definitions", adt_ty),
+                );
+                err.help("unlike in C++, Java, and C#, functions are declared in `impl` blocks");
+                err.help("see https://doc.rust-lang.org/book/ch05-03-method-syntax.html for more information");
+                err
+            } else {
+                self.expected_ident_found()
+            };
+            return Err(err);
+        }
+        self.bump();
+        Ok(ident)
     }
 
     /// Parses a declarative macro 2.0 definition.
@@ -1445,7 +1534,7 @@ impl<'a> Parser<'a> {
         Ok((ident, ItemKind::MacroDef(ast::MacroDef { body, macro_rules: false })))
     }
 
-    /// Is this unambiguously the start of a `macro_rules! foo` item defnition?
+    /// Is this unambiguously the start of a `macro_rules! foo` item definition?
     fn is_macro_rules_item(&mut self) -> bool {
         self.check_keyword(kw::MacroRules)
             && self.look_ahead(1, |t| *t == token::Not)
@@ -1458,6 +1547,20 @@ impl<'a> Parser<'a> {
         self.expect(&token::Not)?; // `!`
 
         let ident = self.parse_ident()?;
+
+        if self.eat(&token::Not) {
+            // Handle macro_rules! foo!
+            let span = self.prev_token.span;
+            self.struct_span_err(span, "macro names aren't followed by a `!`")
+                .span_suggestion(
+                    span,
+                    "remove the `!`",
+                    "".to_owned(),
+                    Applicability::MachineApplicable,
+                )
+                .emit();
+        }
+
         let body = self.parse_mac_args()?;
         self.eat_semi_for_macro_if_needed(&body);
         self.complain_if_pub_macro(vis, true);
@@ -1475,7 +1578,15 @@ impl<'a> Parser<'a> {
         let vstr = pprust::vis_to_string(vis);
         let vstr = vstr.trim_end();
         if macro_rules {
-            self.sess.gated_spans.gate(sym::pub_macro_rules, vis.span);
+            let msg = format!("can't qualify macro_rules invocation with `{}`", vstr);
+            self.struct_span_err(vis.span, &msg)
+                .span_suggestion(
+                    vis.span,
+                    "try exporting the macro",
+                    "#[macro_export]".to_owned(),
+                    Applicability::MaybeIncorrect, // speculative
+                )
+                .emit();
         } else {
             self.struct_span_err(vis.span, "can't qualify macro invocation with `pub`")
                 .span_suggestion(
@@ -1623,31 +1734,38 @@ impl<'a> Parser<'a> {
                     // the AST for typechecking.
                     err.span_label(ident.span, "while parsing this `fn`");
                     err.emit();
-                    (Vec::new(), None)
                 } else {
                     return Err(err);
                 }
-            } else {
-                unreachable!()
             }
+            (Vec::new(), None)
         };
         attrs.extend(inner_attrs);
         Ok(body)
     }
 
     /// Is the current token the start of an `FnHeader` / not a valid parse?
-    pub(super) fn check_fn_front_matter(&mut self) -> bool {
+    ///
+    /// `check_pub` adds additional `pub` to the checks in case users place it
+    /// wrongly, can be used to ensure `pub` never comes after `default`.
+    pub(super) fn check_fn_front_matter(&mut self, check_pub: bool) -> bool {
         // We use an over-approximation here.
         // `const const`, `fn const` won't parse, but we're not stepping over other syntax either.
-        const QUALS: [Symbol; 4] = [kw::Const, kw::Async, kw::Unsafe, kw::Extern];
+        // `pub` is added in case users got confused with the ordering like `async pub fn`,
+        // only if it wasn't preceeded by `default` as `default pub` is invalid.
+        let quals: &[Symbol] = if check_pub {
+            &[kw::Pub, kw::Const, kw::Async, kw::Unsafe, kw::Extern]
+        } else {
+            &[kw::Const, kw::Async, kw::Unsafe, kw::Extern]
+        };
         self.check_keyword(kw::Fn) // Definitely an `fn`.
             // `$qual fn` or `$qual $qual`:
-            || QUALS.iter().any(|&kw| self.check_keyword(kw))
+            || quals.iter().any(|&kw| self.check_keyword(kw))
                 && self.look_ahead(1, |t| {
                     // `$qual fn`, e.g. `const fn` or `async fn`.
                     t.is_keyword(kw::Fn)
                     // Two qualifiers `$qual $qual` is enough, e.g. `async unsafe`.
-                    || t.is_non_raw_ident_where(|i| QUALS.contains(&i.name)
+                    || t.is_non_raw_ident_where(|i| quals.contains(&i.name)
                         // Rule out 2015 `const async: T = val`.
                         && i.is_reserved()
                         // Rule out unsafe extern block.
@@ -1668,9 +1786,16 @@ impl<'a> Parser<'a> {
     /// FnFrontMatter = FnQual "fn" ;
     /// ```
     pub(super) fn parse_fn_front_matter(&mut self) -> PResult<'a, FnHeader> {
+        let sp_start = self.token.span;
         let constness = self.parse_constness();
+
+        let async_start_sp = self.token.span;
         let asyncness = self.parse_asyncness();
+
+        let unsafe_start_sp = self.token.span;
         let unsafety = self.parse_unsafety();
+
+        let ext_start_sp = self.token.span;
         let ext = self.parse_extern();
 
         if let Async::Yes { span, .. } = asyncness {
@@ -1681,8 +1806,60 @@ impl<'a> Parser<'a> {
             // It is possible for `expect_one_of` to recover given the contents of
             // `self.expected_tokens`, therefore, do not use `self.unexpected()` which doesn't
             // account for this.
-            if !self.expect_one_of(&[], &[])? {
-                unreachable!()
+            match self.expect_one_of(&[], &[]) {
+                Ok(true) => {}
+                Ok(false) => unreachable!(),
+                Err(mut err) => {
+                    // Qualifier keywords ordering check
+
+                    // This will allow the machine fix to directly place the keyword in the correct place
+                    let current_qual_sp = if self.check_keyword(kw::Const) {
+                        Some(async_start_sp)
+                    } else if self.check_keyword(kw::Async) {
+                        Some(unsafe_start_sp)
+                    } else if self.check_keyword(kw::Unsafe) {
+                        Some(ext_start_sp)
+                    } else {
+                        None
+                    };
+
+                    if let Some(current_qual_sp) = current_qual_sp {
+                        let current_qual_sp = current_qual_sp.to(self.prev_token.span);
+                        if let Ok(current_qual) = self.span_to_snippet(current_qual_sp) {
+                            let invalid_qual_sp = self.token.uninterpolated_span();
+                            let invalid_qual = self.span_to_snippet(invalid_qual_sp).unwrap();
+
+                            err.span_suggestion(
+                                current_qual_sp.to(invalid_qual_sp),
+                                &format!("`{}` must come before `{}`", invalid_qual, current_qual),
+                                format!("{} {}", invalid_qual, current_qual),
+                                Applicability::MachineApplicable,
+                            ).note("keyword order for functions declaration is `default`, `pub`, `const`, `async`, `unsafe`, `extern`");
+                        }
+                    }
+                    // Recover incorrect visibility order such as `async pub`.
+                    else if self.check_keyword(kw::Pub) {
+                        let sp = sp_start.to(self.prev_token.span);
+                        if let Ok(snippet) = self.span_to_snippet(sp) {
+                            let vis = match self.parse_visibility(FollowedByType::No) {
+                                Ok(v) => v,
+                                Err(mut d) => {
+                                    d.cancel();
+                                    return Err(err);
+                                }
+                            };
+                            let vs = pprust::vis_to_string(&vis);
+                            let vs = vs.trim_end();
+                            err.span_suggestion(
+                                sp_start.to(self.prev_token.span),
+                                &format!("visibility `{}` must come before `{}`", vs, snippet),
+                                format!("{} {}", vs, snippet),
+                                Applicability::MachineApplicable,
+                            );
+                        }
+                    }
+                    return Err(err);
+                }
             }
         }
 

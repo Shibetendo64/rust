@@ -15,6 +15,8 @@
 #![feature(new_uninit)]
 #![feature(maybe_uninit_slice)]
 #![feature(min_specialization)]
+#![feature(decl_macro)]
+#![feature(rustc_attrs)]
 #![cfg_attr(test, feature(test))]
 
 use rustc_data_structures::sync;
@@ -236,26 +238,6 @@ impl<T> TypedArena<T> {
         start_ptr
     }
 
-    /// Allocates a slice of objects that are copied into the `TypedArena`, returning a mutable
-    /// reference to it. Will panic if passed a zero-sized types.
-    ///
-    /// Panics:
-    ///
-    ///  - Zero-sized types
-    ///  - Zero-length slices
-    #[inline]
-    pub fn alloc_slice(&self, slice: &[T]) -> &mut [T]
-    where
-        T: Copy,
-    {
-        unsafe {
-            let len = slice.len();
-            let start_ptr = self.alloc_raw_slice(len);
-            slice.as_ptr().copy_to_nonoverlapping(start_ptr, len);
-            slice::from_raw_parts_mut(start_ptr, len)
-        }
-    }
-
     #[inline]
     pub fn alloc_from_iter<I: IntoIterator<Item = T>>(&self, iter: I) -> &mut [T] {
         assert!(mem::size_of::<T>() != 0);
@@ -295,22 +277,6 @@ impl<T> TypedArena<T> {
             self.ptr.set(chunk.start());
             self.end.set(chunk.end());
             chunks.push(chunk);
-        }
-    }
-
-    /// Clears the arena. Deallocates all but the longest chunk which may be reused.
-    pub fn clear(&mut self) {
-        unsafe {
-            // Clear the last chunk, which is partially filled.
-            let mut chunks_borrow = self.chunks.borrow_mut();
-            if let Some(mut last_chunk) = chunks_borrow.last_mut() {
-                self.clear_last_chunk(&mut last_chunk);
-                let len = chunks_borrow.len();
-                // If `T` is ZST, code below has no effect.
-                for mut chunk in chunks_borrow.drain(..len - 1) {
-                    chunk.destroy(chunk.entries);
-                }
-            }
         }
     }
 
@@ -644,117 +610,113 @@ impl DropArena {
     }
 }
 
-#[macro_export]
-macro_rules! arena_for_type {
+pub macro arena_for_type {
     ([][$ty:ty]) => {
         $crate::TypedArena<$ty>
-    };
+    },
     ([few $(, $attrs:ident)*][$ty:ty]) => {
         ::std::marker::PhantomData<$ty>
-    };
+    },
     ([$ignore:ident $(, $attrs:ident)*]$args:tt) => {
         $crate::arena_for_type!([$($attrs),*]$args)
-    };
+    },
 }
 
-#[macro_export]
-macro_rules! which_arena_for_type {
+pub macro which_arena_for_type {
     ([][$arena:expr]) => {
         ::std::option::Option::Some($arena)
-    };
+    },
     ([few$(, $attrs:ident)*][$arena:expr]) => {
         ::std::option::Option::None
-    };
+    },
     ([$ignore:ident$(, $attrs:ident)*]$args:tt) => {
         $crate::which_arena_for_type!([$($attrs),*]$args)
-    };
+    },
 }
 
-#[macro_export]
-macro_rules! declare_arena {
-    ([], [$($a:tt $name:ident: $ty:ty,)*], $tcx:lifetime) => {
-        #[derive(Default)]
-        pub struct Arena<$tcx> {
-            pub dropless: $crate::DroplessArena,
-            drop: $crate::DropArena,
-            $($name: $crate::arena_for_type!($a[$ty]),)*
+#[rustc_macro_transparency = "semitransparent"]
+pub macro declare_arena([$($a:tt $name:ident: $ty:ty,)*], $tcx:lifetime) {
+    #[derive(Default)]
+    pub struct Arena<$tcx> {
+        pub dropless: $crate::DroplessArena,
+        drop: $crate::DropArena,
+        $($name: $crate::arena_for_type!($a[$ty]),)*
+    }
+
+    pub trait ArenaAllocatable<'tcx, T = Self>: Sized {
+        fn allocate_on<'a>(self, arena: &'a Arena<'tcx>) -> &'a mut Self;
+        fn allocate_from_iter<'a>(
+            arena: &'a Arena<'tcx>,
+            iter: impl ::std::iter::IntoIterator<Item = Self>,
+        ) -> &'a mut [Self];
+    }
+
+    impl<'tcx, T: Copy> ArenaAllocatable<'tcx, ()> for T {
+        #[inline]
+        fn allocate_on<'a>(self, arena: &'a Arena<'tcx>) -> &'a mut Self {
+            arena.dropless.alloc(self)
+        }
+        #[inline]
+        fn allocate_from_iter<'a>(
+            arena: &'a Arena<'tcx>,
+            iter: impl ::std::iter::IntoIterator<Item = Self>,
+        ) -> &'a mut [Self] {
+            arena.dropless.alloc_from_iter(iter)
         }
 
-        pub trait ArenaAllocatable<'tcx, T = Self>: Sized {
-            fn allocate_on<'a>(self, arena: &'a Arena<'tcx>) -> &'a mut Self;
-            fn allocate_from_iter<'a>(
-                arena: &'a Arena<'tcx>,
-                iter: impl ::std::iter::IntoIterator<Item = Self>,
-            ) -> &'a mut [Self];
-        }
-
-        impl<'tcx, T: Copy> ArenaAllocatable<'tcx, ()> for T {
+    }
+    $(
+        impl<$tcx> ArenaAllocatable<$tcx, $ty> for $ty {
             #[inline]
-            fn allocate_on<'a>(self, arena: &'a Arena<'tcx>) -> &'a mut Self {
-                arena.dropless.alloc(self)
+            fn allocate_on<'a>(self, arena: &'a Arena<$tcx>) -> &'a mut Self {
+                if !::std::mem::needs_drop::<Self>() {
+                    return arena.dropless.alloc(self);
+                }
+                match $crate::which_arena_for_type!($a[&arena.$name]) {
+                    ::std::option::Option::<&$crate::TypedArena<Self>>::Some(ty_arena) => {
+                        ty_arena.alloc(self)
+                    }
+                    ::std::option::Option::None => unsafe { arena.drop.alloc(self) },
+                }
             }
+
             #[inline]
             fn allocate_from_iter<'a>(
-                arena: &'a Arena<'tcx>,
+                arena: &'a Arena<$tcx>,
                 iter: impl ::std::iter::IntoIterator<Item = Self>,
             ) -> &'a mut [Self] {
-                arena.dropless.alloc_from_iter(iter)
+                if !::std::mem::needs_drop::<Self>() {
+                    return arena.dropless.alloc_from_iter(iter);
+                }
+                match $crate::which_arena_for_type!($a[&arena.$name]) {
+                    ::std::option::Option::<&$crate::TypedArena<Self>>::Some(ty_arena) => {
+                        ty_arena.alloc_from_iter(iter)
+                    }
+                    ::std::option::Option::None => unsafe { arena.drop.alloc_from_iter(iter) },
+                }
             }
-
         }
-        $(
-            impl<$tcx> ArenaAllocatable<$tcx, $ty> for $ty {
-                #[inline]
-                fn allocate_on<'a>(self, arena: &'a Arena<$tcx>) -> &'a mut Self {
-                    if !::std::mem::needs_drop::<Self>() {
-                        return arena.dropless.alloc(self);
-                    }
-                    match $crate::which_arena_for_type!($a[&arena.$name]) {
-                        ::std::option::Option::<&$crate::TypedArena<Self>>::Some(ty_arena) => {
-                            ty_arena.alloc(self)
-                        }
-                        ::std::option::Option::None => unsafe { arena.drop.alloc(self) },
-                    }
-                }
+    )*
 
-                #[inline]
-                fn allocate_from_iter<'a>(
-                    arena: &'a Arena<$tcx>,
-                    iter: impl ::std::iter::IntoIterator<Item = Self>,
-                ) -> &'a mut [Self] {
-                    if !::std::mem::needs_drop::<Self>() {
-                        return arena.dropless.alloc_from_iter(iter);
-                    }
-                    match $crate::which_arena_for_type!($a[&arena.$name]) {
-                        ::std::option::Option::<&$crate::TypedArena<Self>>::Some(ty_arena) => {
-                            ty_arena.alloc_from_iter(iter)
-                        }
-                        ::std::option::Option::None => unsafe { arena.drop.alloc_from_iter(iter) },
-                    }
-                }
-            }
-        )*
+    impl<'tcx> Arena<'tcx> {
+        #[inline]
+        pub fn alloc<T: ArenaAllocatable<'tcx, U>, U>(&self, value: T) -> &mut T {
+            value.allocate_on(self)
+        }
 
-        impl<'tcx> Arena<'tcx> {
-            #[inline]
-            pub fn alloc<T: ArenaAllocatable<'tcx, U>, U>(&self, value: T) -> &mut T {
-                value.allocate_on(self)
+        #[inline]
+        pub fn alloc_slice<T: ::std::marker::Copy>(&self, value: &[T]) -> &mut [T] {
+            if value.is_empty() {
+                return &mut [];
             }
+            self.dropless.alloc_slice(value)
+        }
 
-            #[inline]
-            pub fn alloc_slice<T: ::std::marker::Copy>(&self, value: &[T]) -> &mut [T] {
-                if value.is_empty() {
-                    return &mut [];
-                }
-                self.dropless.alloc_slice(value)
-            }
-
-            pub fn alloc_from_iter<'a, T: ArenaAllocatable<'tcx, U>, U>(
-                &'a self,
-                iter: impl ::std::iter::IntoIterator<Item = T>,
-            ) -> &'a mut [T] {
-                T::allocate_from_iter(self, iter)
-            }
+        pub fn alloc_from_iter<'a, T: ArenaAllocatable<'tcx, U>, U>(
+            &'a self,
+            iter: impl ::std::iter::IntoIterator<Item = T>,
+        ) -> &'a mut [T] {
+            T::allocate_from_iter(self, iter)
         }
     }
 }

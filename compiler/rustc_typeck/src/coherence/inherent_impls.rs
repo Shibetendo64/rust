@@ -9,16 +9,14 @@
 
 use rustc_errors::struct_span_err;
 use rustc_hir as hir;
-use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LOCAL_CRATE};
+use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::itemlikevisit::ItemLikeVisitor;
 use rustc_middle::ty::{self, CrateInherentImpls, TyCtxt};
 
 use rustc_span::Span;
 
 /// On-demand query: yields a map containing all types mapped to their inherent impls.
-pub fn crate_inherent_impls(tcx: TyCtxt<'_>, crate_num: CrateNum) -> CrateInherentImpls {
-    assert_eq!(crate_num, LOCAL_CRATE);
-
+pub fn crate_inherent_impls(tcx: TyCtxt<'_>, (): ()) -> CrateInherentImpls {
     let krate = tcx.hir().krate();
     let mut collect = InherentCollect { tcx, impls_map: Default::default() };
     krate.visit_all_item_likes(&mut collect);
@@ -27,9 +25,9 @@ pub fn crate_inherent_impls(tcx: TyCtxt<'_>, crate_num: CrateNum) -> CrateInhere
 
 /// On-demand query: yields a vector of the inherent impls for a specific type.
 pub fn inherent_impls(tcx: TyCtxt<'_>, ty_def_id: DefId) -> &[DefId] {
-    assert!(ty_def_id.is_local());
+    let ty_def_id = ty_def_id.expect_local();
 
-    let crate_map = tcx.crate_inherent_impls(ty_def_id.krate);
+    let crate_map = tcx.crate_inherent_impls(());
     match crate_map.inherent_impls.get(&ty_def_id) {
         Some(v) => &v[..],
         None => &[],
@@ -61,6 +59,17 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
             }
             ty::Dynamic(ref data, ..) if data.principal_def_id().is_some() => {
                 self.check_def_id(item, data.principal_def_id().unwrap());
+            }
+            ty::Dynamic(..) => {
+                struct_span_err!(
+                    self.tcx.sess,
+                    ty.span,
+                    E0785,
+                    "cannot define inherent `impl` for a dyn auto trait"
+                )
+                .span_label(ty.span, "impl requires at least one non-auto trait")
+                .note("define and implement a new trait or type instead")
+                .emit();
             }
             ty::Bool => {
                 self.check_primitive_impl(
@@ -364,7 +373,7 @@ impl ItemLikeVisitor<'v> for InherentCollect<'tcx> {
 
 impl InherentCollect<'tcx> {
     fn check_def_id(&mut self, item: &hir::Item<'_>, def_id: DefId) {
-        if def_id.is_local() {
+        if let Some(def_id) = def_id.as_local() {
             // Add the implementation to the mapping from implementation to base
             // type def ID, if there is a base type for this implementation and
             // the implementation does not have any associated traits.
@@ -392,7 +401,7 @@ impl InherentCollect<'tcx> {
         lang: &str,
         ty: &str,
         span: Span,
-        assoc_items: &[hir::ImplItemRef<'_>],
+        assoc_items: &[hir::ImplItemRef],
     ) {
         match (lang_def_id, lang_def_id2) {
             (Some(lang_def_id), _) if lang_def_id == impl_def_id.to_def_id() => {

@@ -8,17 +8,16 @@ use std::ptr;
 use std::str;
 
 use crate::llvm::archive_ro::{ArchiveRO, Child};
-use crate::llvm::{self, ArchiveKind};
-use rustc_codegen_ssa::back::archive::{find_library, ArchiveBuilder};
-use rustc_codegen_ssa::{looks_like_rust_object_file, METADATA_FILENAME};
+use crate::llvm::{self, ArchiveKind, LLVMMachineType, LLVMRustCOFFShortExport};
+use rustc_codegen_ssa::back::archive::ArchiveBuilder;
+use rustc_data_structures::temp_dir::MaybeTempDir;
+use rustc_middle::middle::cstore::{DllCallingConvention, DllImport};
 use rustc_session::Session;
-use rustc_span::symbol::Symbol;
 
 struct ArchiveConfig<'a> {
     pub sess: &'a Session,
     pub dst: PathBuf,
     pub src: Option<PathBuf>,
-    pub lib_search_paths: Vec<PathBuf>,
 }
 
 /// Helper for adding many files to an archive.
@@ -52,12 +51,17 @@ fn is_relevant_child(c: &Child<'_>) -> bool {
 }
 
 fn archive_config<'a>(sess: &'a Session, output: &Path, input: Option<&Path>) -> ArchiveConfig<'a> {
-    use rustc_codegen_ssa::back::link::archive_search_paths;
-    ArchiveConfig {
-        sess,
-        dst: output.to_path_buf(),
-        src: input.map(|p| p.to_path_buf()),
-        lib_search_paths: archive_search_paths(sess),
+    ArchiveConfig { sess, dst: output.to_path_buf(), src: input.map(|p| p.to_path_buf()) }
+}
+
+/// Map machine type strings to values of LLVM's MachineTypes enum.
+fn llvm_machine_type(cpu: &str) -> LLVMMachineType {
+    match cpu {
+        "x86_64" => LLVMMachineType::AMD64,
+        "x86" => LLVMMachineType::I386,
+        "aarch64" => LLVMMachineType::ARM64,
+        "arm" => LLVMMachineType::ARM,
+        _ => panic!("unsupported cpu type {}", cpu),
     }
 }
 
@@ -98,56 +102,23 @@ impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
             .collect()
     }
 
-    /// Adds all of the contents of a native library to this archive. This will
-    /// search in the relevant locations for a library named `name`.
-    fn add_native_library(&mut self, name: Symbol) {
-        let location = find_library(name, &self.config.lib_search_paths, self.config.sess);
-        self.add_archive(&location, |_| false).unwrap_or_else(|e| {
-            self.config.sess.fatal(&format!(
-                "failed to add native library {}: {}",
-                location.to_string_lossy(),
-                e
-            ));
+    fn add_archive<F>(&mut self, archive: &Path, skip: F) -> io::Result<()>
+    where
+        F: FnMut(&str) -> bool + 'static,
+    {
+        let archive_ro = match ArchiveRO::open(archive) {
+            Ok(ar) => ar,
+            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
+        };
+        if self.additions.iter().any(|ar| ar.path() == archive) {
+            return Ok(());
+        }
+        self.additions.push(Addition::Archive {
+            path: archive.to_path_buf(),
+            archive: archive_ro,
+            skip: Box::new(skip),
         });
-    }
-
-    /// Adds all of the contents of the rlib at the specified path to this
-    /// archive.
-    ///
-    /// This ignores adding the bytecode from the rlib, and if LTO is enabled
-    /// then the object file also isn't added.
-    fn add_rlib(
-        &mut self,
-        rlib: &Path,
-        name: &str,
-        lto: bool,
-        skip_objects: bool,
-    ) -> io::Result<()> {
-        // Ignoring obj file starting with the crate name
-        // as simple comparison is not enough - there
-        // might be also an extra name suffix
-        let obj_start = name.to_owned();
-
-        self.add_archive(rlib, move |fname: &str| {
-            // Ignore metadata files, no matter the name.
-            if fname == METADATA_FILENAME {
-                return true;
-            }
-
-            // Don't include Rust objects if LTO is enabled
-            if lto && looks_like_rust_object_file(fname) {
-                return true;
-            }
-
-            // Otherwise if this is *not* a rust object and we're skipping
-            // objects then skip this file
-            if skip_objects && (!fname.starts_with(&obj_start) || !fname.ends_with(".o")) {
-                return true;
-            }
-
-            // ok, don't skip this
-            false
-        })
+        Ok(())
     }
 
     /// Adds an arbitrary file to this archive
@@ -174,6 +145,76 @@ impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
             self.config.sess.fatal(&format!("failed to build archive: {}", e));
         }
     }
+
+    fn inject_dll_import_lib(
+        &mut self,
+        lib_name: &str,
+        dll_imports: &[DllImport],
+        tmpdir: &MaybeTempDir,
+    ) {
+        let output_path = {
+            let mut output_path: PathBuf = tmpdir.as_ref().to_path_buf();
+            output_path.push(format!("{}_imports", lib_name));
+            output_path.with_extension("lib")
+        };
+
+        // we've checked for \0 characters in the library name already
+        let dll_name_z = CString::new(lib_name).unwrap();
+        // All import names are Rust identifiers and therefore cannot contain \0 characters.
+        // FIXME: when support for #[link_name] implemented, ensure that import.name values don't
+        // have any \0 characters
+        let import_name_vector: Vec<CString> = dll_imports
+            .iter()
+            .map(|import: &DllImport| {
+                if self.config.sess.target.arch == "x86" {
+                    LlvmArchiveBuilder::i686_decorated_name(import)
+                } else {
+                    CString::new(import.name.to_string()).unwrap()
+                }
+            })
+            .collect();
+
+        let output_path_z = rustc_fs_util::path_to_c_string(&output_path);
+
+        tracing::trace!("invoking LLVMRustWriteImportLibrary");
+        tracing::trace!("  dll_name {:#?}", dll_name_z);
+        tracing::trace!("  output_path {}", output_path.display());
+        tracing::trace!(
+            "  import names: {}",
+            dll_imports.iter().map(|import| import.name.to_string()).collect::<Vec<_>>().join(", "),
+        );
+
+        let ffi_exports: Vec<LLVMRustCOFFShortExport> = import_name_vector
+            .iter()
+            .map(|name_z| LLVMRustCOFFShortExport::from_name(name_z.as_ptr()))
+            .collect();
+        let result = unsafe {
+            crate::llvm::LLVMRustWriteImportLibrary(
+                dll_name_z.as_ptr(),
+                output_path_z.as_ptr(),
+                ffi_exports.as_ptr(),
+                ffi_exports.len(),
+                llvm_machine_type(&self.config.sess.target.arch) as u16,
+                !self.config.sess.target.is_like_msvc,
+            )
+        };
+
+        if result == crate::llvm::LLVMRustResult::Failure {
+            self.config.sess.fatal(&format!(
+                "Error creating import library for {}: {}",
+                lib_name,
+                llvm::last_error().unwrap_or("unknown LLVM error".to_string())
+            ));
+        }
+
+        self.add_archive(&output_path, |_| false).unwrap_or_else(|e| {
+            self.config.sess.fatal(&format!(
+                "failed to add native library {}: {}",
+                output_path.display(),
+                e
+            ));
+        });
+    }
 }
 
 impl<'a> LlvmArchiveBuilder<'a> {
@@ -184,25 +225,6 @@ impl<'a> LlvmArchiveBuilder<'a> {
         let src = self.config.src.as_ref()?;
         self.src_archive = Some(ArchiveRO::open(src).ok());
         self.src_archive.as_ref().unwrap().as_ref()
-    }
-
-    fn add_archive<F>(&mut self, archive: &Path, skip: F) -> io::Result<()>
-    where
-        F: FnMut(&str) -> bool + 'static,
-    {
-        let archive_ro = match ArchiveRO::open(archive) {
-            Ok(ar) => ar,
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
-        };
-        if self.additions.iter().any(|ar| ar.path() == archive) {
-            return Ok(());
-        }
-        self.additions.push(Addition::Archive {
-            path: archive.to_path_buf(),
-            archive: archive_ro,
-            skip: Box::new(skip),
-        });
-        Ok(())
     }
 
     fn llvm_archive_kind(&self) -> Result<ArchiveKind, &str> {
@@ -308,6 +330,21 @@ impl<'a> LlvmArchiveBuilder<'a> {
             }
             ret
         }
+    }
+
+    fn i686_decorated_name(import: &DllImport) -> CString {
+        let name = import.name;
+        // We verified during construction that `name` does not contain any NULL characters, so the
+        // conversion to CString is guaranteed to succeed.
+        CString::new(match import.calling_convention {
+            DllCallingConvention::C => format!("_{}", name),
+            DllCallingConvention::Stdcall(arg_list_size) => format!("_{}@{}", name, arg_list_size),
+            DllCallingConvention::Fastcall(arg_list_size) => format!("@{}@{}", name, arg_list_size),
+            DllCallingConvention::Vectorcall(arg_list_size) => {
+                format!("{}@@{}", name, arg_list_size)
+            }
+        })
+        .unwrap()
     }
 }
 

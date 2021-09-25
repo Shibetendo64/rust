@@ -64,7 +64,7 @@ use crate::infer::outlives::verify::VerifyBoundCx;
 use crate::infer::{
     self, GenericKind, InferCtxt, RegionObligation, SubregionOrigin, UndoLog, VerifyBound,
 };
-use crate::traits::ObligationCause;
+use crate::traits::{ObligationCause, ObligationCauseCode};
 use rustc_middle::ty::outlives::Component;
 use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::{self, Region, Ty, TyCtxt, TypeFoldable};
@@ -99,7 +99,14 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
         cause: &ObligationCause<'tcx>,
     ) {
         let origin = SubregionOrigin::from_obligation_cause(cause, || {
-            infer::RelateParamBound(cause.span, sup_type)
+            infer::RelateParamBound(
+                cause.span,
+                sup_type,
+                match cause.code.peel_derives() {
+                    ObligationCauseCode::BindingObligation(_, span) => Some(*span),
+                    _ => None,
+                },
+            )
         });
 
         self.register_region_obligation(
@@ -185,28 +192,6 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
                 )
             }
         }
-    }
-
-    /// Processes a single ad-hoc region obligation that was not
-    /// registered in advance.
-    pub fn type_must_outlive(
-        &self,
-        region_bound_pairs: &RegionBoundPairs<'tcx>,
-        implicit_region_bound: Option<ty::Region<'tcx>>,
-        param_env: ty::ParamEnv<'tcx>,
-        origin: infer::SubregionOrigin<'tcx>,
-        ty: Ty<'tcx>,
-        region: ty::Region<'tcx>,
-    ) {
-        let outlives = &mut TypeOutlives::new(
-            self,
-            self.tcx,
-            region_bound_pairs,
-            implicit_region_bound,
-            param_env,
-        );
-        let ty = self.resolve_vars_if_possible(ty);
-        outlives.type_must_outlive(origin, ty, region);
     }
 }
 

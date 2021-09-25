@@ -35,6 +35,13 @@ Which can feel more flexible. Note that this would generate this:
 
 but given that docs are rendered via Markdown, it will remove these newlines.
 
+Another use case is for including external files as documentation:
+
+```rust,no_run
+#[doc = include_str!("../README.md")]
+# fn f() {}
+```
+
 The `doc` attribute has more options though! These don't involve the text of
 the output, but instead, various aspects of the presentation of the output.
 We've split them into two kinds below: attributes that are useful at the
@@ -216,9 +223,3 @@ not eagerly inline it as a module unless you add `#[doc(inline)]`.
 
 Any item annotated with `#[doc(hidden)]` will not appear in the documentation, unless
 the `strip-hidden` pass is removed.
-
-## `#[doc(primitive)]`
-
-Since primitive types are defined in the compiler, there's no place to attach documentation
-attributes. This attribute is used by the standard library to provide a way to generate
-documentation for primitive types.

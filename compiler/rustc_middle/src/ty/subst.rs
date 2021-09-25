@@ -1,5 +1,6 @@
 // Type substitutions.
 
+use crate::mir;
 use crate::ty::codec::{TyDecoder, TyEncoder};
 use crate::ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
 use crate::ty::sty::{ClosureSubsts, GeneratorSubsts};
@@ -21,7 +22,7 @@ use std::ops::ControlFlow;
 
 /// An entity in the Rust type system, which can be one of
 /// several kinds (types, lifetimes, and consts).
-/// To reduce memory usage, a `GenericArg` is a interned pointer,
+/// To reduce memory usage, a `GenericArg` is an interned pointer,
 /// with the lowest 2 bits being reserved for a tag to
 /// indicate the type (`Ty`, `Region`, or `Const`) it points to.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -196,19 +197,19 @@ impl<'a, 'tcx> InternalSubsts<'tcx> {
     }
 
     /// Interpret these substitutions as the substitutions of a generator type.
-    /// Closure substitutions have a particular structure controlled by the
+    /// Generator substitutions have a particular structure controlled by the
     /// compiler that encodes information like the signature and generator kind;
     /// see `ty::GeneratorSubsts` struct for more comments.
     pub fn as_generator(&'tcx self) -> GeneratorSubsts<'tcx> {
         GeneratorSubsts { substs: self }
     }
 
-    /// Creates a `InternalSubsts` that maps each generic parameter to itself.
+    /// Creates an `InternalSubsts` that maps each generic parameter to itself.
     pub fn identity_for_item(tcx: TyCtxt<'tcx>, def_id: DefId) -> SubstsRef<'tcx> {
         Self::for_item(tcx, def_id, |param, _| tcx.mk_param_from_def(param))
     }
 
-    /// Creates a `InternalSubsts` for generic parameter definitions,
+    /// Creates an `InternalSubsts` for generic parameter definitions,
     /// by calling closures to obtain each kind.
     /// The closures get to observe the `InternalSubsts` as they're
     /// being built, which can be used to correctly
@@ -233,7 +234,7 @@ impl<'a, 'tcx> InternalSubsts<'tcx> {
         })
     }
 
-    fn fill_item<F>(
+    pub fn fill_item<F>(
         substs: &mut SmallVec<[GenericArg<'tcx>; 8]>,
         tcx: TyCtxt<'tcx>,
         defs: &ty::Generics,
@@ -248,7 +249,7 @@ impl<'a, 'tcx> InternalSubsts<'tcx> {
         Self::fill_single(substs, defs, mk_kind)
     }
 
-    fn fill_single<F>(
+    pub fn fill_single<F>(
         substs: &mut SmallVec<[GenericArg<'tcx>; 8]>,
         defs: &ty::Generics,
         mk_kind: &mut F,
@@ -448,7 +449,10 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
         self.tcx
     }
 
-    fn fold_binder<T: TypeFoldable<'tcx>>(&mut self, t: ty::Binder<T>) -> ty::Binder<T> {
+    fn fold_binder<T: TypeFoldable<'tcx>>(
+        &mut self,
+        t: ty::Binder<'tcx, T>,
+    ) -> ty::Binder<'tcx, T> {
         self.binders_passed += 1;
         let t = t.super_fold_with(self);
         self.binders_passed -= 1;
@@ -482,7 +486,7 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
     }
 
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-        if !t.needs_subst() {
+        if !t.potentially_needs_subst() {
             return t;
         }
 
@@ -493,15 +497,16 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
     }
 
     fn fold_const(&mut self, c: &'tcx ty::Const<'tcx>) -> &'tcx ty::Const<'tcx> {
-        if !c.needs_subst() {
-            return c;
-        }
-
         if let ty::ConstKind::Param(p) = c.val {
             self.const_for_param(p, c)
         } else {
             c.super_fold_with(self)
         }
+    }
+
+    #[inline]
+    fn fold_mir_const(&mut self, c: mir::ConstantKind<'tcx>) -> mir::ConstantKind<'tcx> {
+        c.super_fold_with(self)
     }
 }
 

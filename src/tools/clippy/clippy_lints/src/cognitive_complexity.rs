@@ -1,5 +1,9 @@
 //! calculate cognitive complexity and warn about overly complex functions
 
+use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::source::snippet_opt;
+use clippy_utils::ty::is_type_diagnostic_item;
+use clippy_utils::LimitStack;
 use rustc_ast::ast::Attribute;
 use rustc_hir::intravisit::{walk_expr, FnKind, NestedVisitorMap, Visitor};
 use rustc_hir::{Body, Expr, ExprKind, FnDecl, HirId};
@@ -9,18 +13,20 @@ use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Span;
 use rustc_span::{sym, BytePos};
 
-use crate::utils::{is_type_diagnostic_item, snippet_opt, span_lint_and_help, LimitStack};
-
 declare_clippy_lint! {
-    /// **What it does:** Checks for methods with high cognitive complexity.
+    /// ### What it does
+    /// Checks for methods with high cognitive complexity.
     ///
-    /// **Why is this bad?** Methods of high cognitive complexity tend to be hard to
+    /// ### Why is this bad?
+    /// Methods of high cognitive complexity tend to be hard to
     /// both read and maintain. Also LLVM will tend to optimize small methods better.
     ///
-    /// **Known problems:** Sometimes it's hard to find a way to reduce the
+    /// ### Known problems
+    /// Sometimes it's hard to find a way to reduce the
     /// complexity.
     ///
-    /// **Example:** No. You'll see it when you get the warning.
+    /// ### Example
+    /// No. You'll see it when you get the warning.
     pub COGNITIVE_COMPLEXITY,
     nursery,
     "functions that should be split up into multiple functions"
@@ -89,7 +95,7 @@ impl CognitiveComplexity {
                     });
 
                     if let Some((low, high)) = pos {
-                        Span::new(low, high, header_span.ctxt())
+                        Span::new(low, high, header_span.ctxt(), header_span.parent())
                     } else {
                         return;
                     }
@@ -150,7 +156,7 @@ impl<'tcx> Visitor<'tcx> for CcHelper {
             ExprKind::If(_, _, _) => {
                 self.cc += 1;
             },
-            ExprKind::Match(_, ref arms, _) => {
+            ExprKind::Match(_, arms, _) => {
                 if arms.len() > 1 {
                     self.cc += 1;
                 }

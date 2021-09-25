@@ -36,8 +36,8 @@ crate struct ParsedExternalMod {
 pub enum ModError<'a> {
     CircularInclusion(Vec<PathBuf>),
     ModInBlock(Option<Ident>),
-    FileNotFound(Ident, PathBuf),
-    MultipleCandidates(Ident, String, String),
+    FileNotFound(Ident, PathBuf, PathBuf),
+    MultipleCandidates(Ident, PathBuf, PathBuf),
     ParserError(DiagnosticBuilder<'a>),
 }
 
@@ -86,13 +86,12 @@ crate fn mod_dir_path(
     inline: Inline,
 ) -> (PathBuf, DirOwnership) {
     match inline {
+        Inline::Yes if let Some(file_path) = mod_file_path_from_attr(sess, attrs, &module.dir_path) => {
+            // For inline modules file path from `#[path]` is actually the directory path
+            // for historical reasons, so we don't pop the last segment here.
+            (file_path, DirOwnership::Owned { relative: None })
+        }
         Inline::Yes => {
-            if let Some(file_path) = mod_file_path_from_attr(sess, attrs, &module.dir_path) {
-                // For inline modules file path from `#[path]` is actually the directory path
-                // for historical reasons, so we don't pop the last segment here.
-                return (file_path, DirOwnership::Owned { relative: None });
-            }
-
             // We have to push on the current module name in the case of relative
             // paths in order to ensure that any additional module paths from inline
             // `mod x { ... }` come after the relative extension.
@@ -219,10 +218,8 @@ pub fn default_submod_path<'a>(
             file_path: secondary_path,
             dir_ownership: DirOwnership::Owned { relative: None },
         }),
-        (false, false) => Err(ModError::FileNotFound(ident, default_path)),
-        (true, true) => {
-            Err(ModError::MultipleCandidates(ident, default_path_str, secondary_path_str))
-        }
+        (false, false) => Err(ModError::FileNotFound(ident, default_path, secondary_path)),
+        (true, true) => Err(ModError::MultipleCandidates(ident, default_path, secondary_path)),
     }
 }
 
@@ -249,7 +246,7 @@ impl ModError<'_> {
                 }
                 err
             }
-            ModError::FileNotFound(ident, default_path) => {
+            ModError::FileNotFound(ident, default_path, secondary_path) => {
                 let mut err = struct_span_err!(
                     diag,
                     span,
@@ -258,21 +255,22 @@ impl ModError<'_> {
                     ident,
                 );
                 err.help(&format!(
-                    "to create the module `{}`, create file \"{}\"",
+                    "to create the module `{}`, create file \"{}\" or \"{}\"",
                     ident,
                     default_path.display(),
+                    secondary_path.display(),
                 ));
                 err
             }
-            ModError::MultipleCandidates(ident, default_path_short, secondary_path_short) => {
+            ModError::MultipleCandidates(ident, default_path, secondary_path) => {
                 let mut err = struct_span_err!(
                     diag,
                     span,
                     E0761,
-                    "file for module `{}` found at both {} and {}",
+                    "file for module `{}` found at both \"{}\" and \"{}\"",
                     ident,
-                    default_path_short,
-                    secondary_path_short,
+                    default_path.display(),
+                    secondary_path.display(),
                 );
                 err.help("delete or rename one of them to remove the ambiguity");
                 err

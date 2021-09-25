@@ -1,5 +1,8 @@
-use crate::consts::{constant_context, Constant};
-use crate::utils::{in_macro, is_type_diagnostic_item, snippet, span_lint_and_sugg};
+use clippy_utils::consts::{constant_context, Constant};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::in_macro;
+use clippy_utils::source::snippet;
+use clippy_utils::ty::is_type_diagnostic_item;
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind};
@@ -8,17 +11,20 @@ use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `.repeat(1)` and suggest the following method for each types.
+    /// ### What it does
+    /// Checks for usage of `.repeat(1)` and suggest the following method for each types.
     /// - `.to_string()` for `str`
     /// - `.clone()` for `String`
     /// - `.to_vec()` for `slice`
     ///
-    /// **Why is this bad?** For example, `String.repeat(1)` is equivalent to `.clone()`. If cloning the string is the intention behind this, `clone()` should be used.
+    /// The lint will evaluate constant expressions and values as arguments of `.repeat(..)` and emit a message if
+    /// they are equivalent to `1`. (Related discussion in [rust-clippy#7306](https://github.com/rust-lang/rust-clippy/issues/7306))
     ///
-    /// **Known problems:** None.
+    /// ### Why is this bad?
+    /// For example, `String.repeat(1)` is equivalent to `.clone()`. If cloning
+    /// the string is the intention behind this, `clone()` should be used.
     ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// fn main() {
     ///     let x = String::from("hello world").repeat(1);
@@ -42,10 +48,10 @@ impl<'tcx> LateLintPass<'tcx> for RepeatOnce {
         if_chain! {
             if let ExprKind::MethodCall(path, _, [receiver, count], _) = &expr.kind;
             if path.ident.name == sym!(repeat);
-            if let Some(Constant::Int(1)) = constant_context(cx, cx.typeck_results()).expr(&count);
+            if let Some(Constant::Int(1)) = constant_context(cx, cx.typeck_results()).expr(count);
             if !in_macro(receiver.span);
             then {
-                let ty = cx.typeck_results().expr_ty(&receiver).peel_refs();
+                let ty = cx.typeck_results().expr_ty(receiver).peel_refs();
                 if ty.is_str() {
                     span_lint_and_sugg(
                         cx,

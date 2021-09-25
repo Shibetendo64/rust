@@ -1,6 +1,7 @@
+//! A module for searching for libraries
+
 pub use self::FileMatch::*;
 
-use std::borrow::Cow;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,8 +15,6 @@ pub enum FileMatch {
     FileMatches,
     FileDoesntMatch,
 }
-
-// A module for searching for libraries
 
 #[derive(Clone)]
 pub struct FileSearch<'a> {
@@ -84,37 +83,20 @@ impl<'a> FileSearch<'a> {
         FileSearch { sysroot, triple, search_paths, tlib_path, kind }
     }
 
-    // Returns just the directories within the search paths.
+    /// Returns just the directories within the search paths.
     pub fn search_path_dirs(&self) -> Vec<PathBuf> {
         self.search_paths().map(|sp| sp.dir.to_path_buf()).collect()
     }
-
-    // Returns a list of directories where target-specific tool binaries are located.
-    pub fn get_tools_search_paths(&self, self_contained: bool) -> Vec<PathBuf> {
-        let mut p = PathBuf::from(self.sysroot);
-        p.push(find_libdir(self.sysroot).as_ref());
-        p.push(RUST_LIB_DIR);
-        p.push(&self.triple);
-        p.push("bin");
-        if self_contained { vec![p.clone(), p.join("self-contained")] } else { vec![p] }
-    }
-}
-
-pub fn relative_target_lib_path(sysroot: &Path, target_triple: &str) -> PathBuf {
-    let mut p = PathBuf::from(find_libdir(sysroot).as_ref());
-    assert!(p.is_relative());
-    p.push(RUST_LIB_DIR);
-    p.push(target_triple);
-    p.push("lib");
-    p
 }
 
 pub fn make_target_lib_path(sysroot: &Path, target_triple: &str) -> PathBuf {
-    sysroot.join(&relative_target_lib_path(sysroot, target_triple))
+    let rustlib_path = rustc_target::target_rustlib_path(sysroot, target_triple);
+    std::array::IntoIter::new([sysroot, Path::new(&rustlib_path), Path::new("lib")])
+        .collect::<PathBuf>()
 }
 
-// This function checks if sysroot is found using env::args().next(), and if it
-// is not found, uses env::current_exe() to imply sysroot.
+/// This function checks if sysroot is found using env::args().next(), and if it
+/// is not found, uses env::current_exe() to imply sysroot.
 pub fn get_or_default_sysroot() -> PathBuf {
     // Follow symlinks.  If the resolved path is relative, make it absolute.
     fn canonicalize(path: PathBuf) -> PathBuf {
@@ -157,11 +139,13 @@ pub fn get_or_default_sysroot() -> PathBuf {
                     return None;
                 }
 
+                // Pop off `bin/rustc`, obtaining the suspected sysroot.
                 p.pop();
                 p.pop();
-                let mut libdir = PathBuf::from(&p);
-                libdir.push(find_libdir(&p).as_ref());
-                if libdir.exists() { Some(p) } else { None }
+                // Look for the target rustlib directory in the suspected sysroot.
+                let mut rustlib_path = rustc_target::target_rustlib_path(&p, "dummy");
+                rustlib_path.pop(); // pop off the dummy target.
+                if rustlib_path.exists() { Some(p) } else { None }
             }
             None => None,
         }
@@ -171,37 +155,3 @@ pub fn get_or_default_sysroot() -> PathBuf {
     // use env::current_exe() to imply sysroot.
     from_env_args_next().unwrap_or_else(from_current_exe)
 }
-
-// The name of the directory rustc expects libraries to be located.
-fn find_libdir(sysroot: &Path) -> Cow<'static, str> {
-    // FIXME: This is a quick hack to make the rustc binary able to locate
-    // Rust libraries in Linux environments where libraries might be installed
-    // to lib64/lib32. This would be more foolproof by basing the sysroot off
-    // of the directory where `librustc_driver` is located, rather than
-    // where the rustc binary is.
-    // If --libdir is set during configuration to the value other than
-    // "lib" (i.e., non-default), this value is used (see issue #16552).
-
-    #[cfg(target_pointer_width = "64")]
-    const PRIMARY_LIB_DIR: &str = "lib64";
-
-    #[cfg(target_pointer_width = "32")]
-    const PRIMARY_LIB_DIR: &str = "lib32";
-
-    const SECONDARY_LIB_DIR: &str = "lib";
-
-    match option_env!("CFG_LIBDIR_RELATIVE") {
-        None | Some("lib") => {
-            if sysroot.join(PRIMARY_LIB_DIR).join(RUST_LIB_DIR).exists() {
-                PRIMARY_LIB_DIR.into()
-            } else {
-                SECONDARY_LIB_DIR.into()
-            }
-        }
-        Some(libdir) => libdir.into(),
-    }
-}
-
-// The name of rustc's own place to organize libraries.
-// Used to be "rustc", now the default is "rustlib"
-const RUST_LIB_DIR: &str = "rustlib";

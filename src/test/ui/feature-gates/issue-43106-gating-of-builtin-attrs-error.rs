@@ -1,5 +1,5 @@
 //~ NOTE: not an `extern crate` item
-//~^ NOTE: not a function or static
+//~^ NOTE: not a free function, impl method or static
 //~^^ NOTE: not a function or closure
 // This is testing whether various builtin attributes signals an
 // error or warning when put in "weird" places.
@@ -8,12 +8,11 @@
 // which would mess up the treatment of other cases in
 // issue-43106-gating-of-builtin-attrs.rs)
 
-// ignore-tidy-linelength
 
 #![macro_export]
 //~^ ERROR: `macro_export` attribute cannot be used at crate level
-#![main]
-//~^ ERROR: `main` attribute cannot be used at crate level
+#![rustc_main] //~ ERROR: the `#[rustc_main]` attribute is used internally to specify
+//~^ ERROR: `rustc_main` attribute cannot be used at crate level
 #![start]
 //~^ ERROR: `start` attribute cannot be used at crate level
 #![repr()]
@@ -26,7 +25,7 @@
 #![no_link]
 //~^ ERROR: attribute should be applied to an `extern crate` item
 #![export_name = "2200"]
-//~^ ERROR: attribute should be applied to a function or static
+//~^ ERROR: attribute should be applied to a free function, impl method or static
 #![inline]
 //~^ ERROR: attribute should be applied to function or closure
 #[inline]
@@ -84,45 +83,37 @@ mod no_link {
 }
 
 #[export_name = "2200"]
-//~^ ERROR attribute should be applied to a function or static
+//~^ ERROR attribute should be applied to a free function, impl method or static
 mod export_name {
-    //~^ NOTE not a function or static
+    //~^ NOTE not a free function, impl method or static
 
     mod inner { #![export_name="2200"] }
-    //~^ ERROR attribute should be applied to a function or static
-    //~| NOTE not a function or static
+    //~^ ERROR attribute should be applied to a free function, impl method or static
+    //~| NOTE not a free function, impl method or static
 
     #[export_name = "2200"] fn f() { }
 
     #[export_name = "2200"] struct S;
-    //~^ ERROR attribute should be applied to a function or static
-    //~| NOTE not a function or static
+    //~^ ERROR attribute should be applied to a free function, impl method or static
+    //~| NOTE not a free function, impl method or static
 
     #[export_name = "2200"] type T = S;
-    //~^ ERROR attribute should be applied to a function or static
-    //~| NOTE not a function or static
+    //~^ ERROR attribute should be applied to a free function, impl method or static
+    //~| NOTE not a free function, impl method or static
 
     #[export_name = "2200"] impl S { }
-    //~^ ERROR attribute should be applied to a function or static
-    //~| NOTE not a function or static
-}
+    //~^ ERROR attribute should be applied to a free function, impl method or static
+    //~| NOTE not a free function, impl method or static
 
-#[main]
-//~^ ERROR: `main` attribute can only be used on functions
-mod main {
-    mod inner { #![main] }
-    //~^ ERROR: `main` attribute can only be used on functions
+    trait Tr {
+        #[export_name = "2200"] fn foo();
+        //~^ ERROR attribute should be applied to a free function, impl method or static
+        //~| NOTE not a free function, impl method or static
 
-    // for `fn f()` case, see feature-gate-main.rs
-
-    #[main] struct S;
-    //~^ ERROR: `main` attribute can only be used on functions
-
-    #[main] type T = S;
-    //~^ ERROR: `main` attribute can only be used on functions
-
-    #[main] impl S { }
-    //~^ ERROR: `main` attribute can only be used on functions
+        #[export_name = "2200"] fn bar() {}
+        //~^ ERROR attribute should be applied to a free function, impl method or static
+        //~| NOTE not a free function, impl method or static
+    }
 }
 
 #[start]

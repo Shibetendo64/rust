@@ -19,6 +19,10 @@
 //! format!("{value}", value=4);      // => "4"
 //! format!("{} {}", 1, 2);           // => "1 2"
 //! format!("{:04}", 42);             // => "0042" with leading zeros
+//! format!("{:#?}", (100, 200));     // => "(
+//!                                   //       100,
+//!                                   //       200,
+//!                                   //     )"
 //! ```
 //!
 //! From these, you can see that the first argument is a format string. It is
@@ -134,7 +138,7 @@
 //! the `0` flag (see below) is specified for numerics, then the implicit fill character is
 //! `0`.
 //!
-//! Note that alignment may not be implemented by some types. In particular, it
+//! Note that alignment might not be implemented by some types. In particular, it
 //! is not generally implemented for the `Debug` trait.  A good way to ensure
 //! padding is applied is to format your input, then pad this resulting string
 //! to obtain your output:
@@ -157,13 +161,12 @@
 //!
 //! * `+` - This is intended for numeric types and indicates that the sign
 //!         should always be printed. Positive signs are never printed by
-//!         default, and the negative sign is only printed by default for the
-//!         `Signed` trait. This flag indicates that the correct sign (`+` or `-`)
-//!         should always be printed.
+//!         default, and the negative sign is only printed by default for signed values.
+//!         This flag indicates that the correct sign (`+` or `-`) should always be printed.
 //! * `-` - Currently not used
 //! * `#` - This flag indicates that the "alternate" form of printing should
 //!         be used. The alternate forms are:
-//!     * `#?` - pretty-print the [`Debug`] formatting
+//!     * `#?` - pretty-print the [`Debug`] formatting (adds linebreaks and indentation)
 //!     * `#x` - precedes the argument with a `0x`
 //!     * `#X` - precedes the argument with a `0x`
 //!     * `#b` - precedes the argument with a `0b`
@@ -297,7 +300,7 @@
 //! count := parameter | integer
 //! parameter := argument '$'
 //! ```
-//! In the above grammar, `text` may not contain any `'{'` or `'}'` characters.
+//! In the above grammar, `text` must not contain any `'{'` or `'}'` characters.
 //!
 //! # Formatting traits
 //!
@@ -543,6 +546,7 @@ pub use core::fmt::{LowerExp, UpperExp};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{LowerHex, Pointer, UpperHex};
 
+#[cfg(not(no_global_oom_handling))]
 use crate::string;
 
 /// The `format` function takes an [`Arguments`] struct and returns the resulting
@@ -571,6 +575,7 @@ use crate::string;
 ///
 /// [`format_args!`]: core::format_args
 /// [`format!`]: crate::format
+#[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn format(args: Arguments<'_>) -> string::String {
     let capacity = args.estimated_capacity();

@@ -2,7 +2,9 @@ use crate::alloc::{Allocator, Global};
 use crate::raw_vec::RawVec;
 use core::fmt;
 use core::intrinsics::arith_offset;
-use core::iter::{FusedIterator, InPlaceIterable, SourceIter, TrustedLen, TrustedRandomAccess};
+use core::iter::{
+    FusedIterator, InPlaceIterable, SourceIter, TrustedLen, TrustedRandomAccessNoCoerce,
+};
 use core::marker::PhantomData;
 use core::mem::{self};
 use core::ptr::{self, NonNull};
@@ -85,20 +87,30 @@ impl<T, A: Allocator> IntoIter<T, A> {
         ptr::slice_from_raw_parts_mut(self.ptr as *mut T, self.len())
     }
 
-    pub(super) fn drop_remaining(&mut self) {
-        unsafe {
-            ptr::drop_in_place(self.as_mut_slice());
-        }
-        self.ptr = self.end;
-    }
+    /// Drops remaining elements and relinquishes the backing allocation.
+    ///
+    /// This is roughly equivalent to the following, but more efficient
+    ///
+    /// ```
+    /// # let mut into_iter = Vec::<u8>::with_capacity(10).into_iter();
+    /// (&mut into_iter).for_each(core::mem::drop);
+    /// unsafe { core::ptr::write(&mut into_iter, Vec::new().into_iter()); }
+    /// ```
+    #[cfg(not(no_global_oom_handling))]
+    pub(super) fn forget_allocation_drop_remaining(&mut self) {
+        let remaining = self.as_raw_mut_slice();
 
-    /// Relinquishes the backing allocation, equivalent to
-    /// `ptr::write(&mut self, Vec::new().into_iter())`
-    pub(super) fn forget_allocation(&mut self) {
+        // overwrite the individual fields instead of creating a new
+        // struct and then overwriting &mut self.
+        // this creates less assembly
         self.cap = 0;
         self.buf = unsafe { NonNull::new_unchecked(RawVec::NEW.ptr()) };
         self.ptr = self.buf.as_ptr();
         self.end = self.buf.as_ptr();
+
+        unsafe {
+            ptr::drop_in_place(remaining);
+        }
     }
 }
 
@@ -153,9 +165,10 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         self.len()
     }
 
+    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, i: usize) -> Self::Item
     where
-        Self: TrustedRandomAccess,
+        Self: TrustedRandomAccessNoCoerce,
     {
         // SAFETY: the caller must guarantee that `i` is in bounds of the
         // `Vec<T>`, so `i` cannot overflow an `isize`, and the `self.ptr.add(i)`
@@ -208,13 +221,17 @@ unsafe impl<T, A: Allocator> TrustedLen for IntoIter<T, A> {}
 #[unstable(issue = "none", feature = "std_internals")]
 // T: Copy as approximation for !Drop since get_unchecked does not advance self.ptr
 // and thus we can't implement drop-handling
-unsafe impl<T, A: Allocator> TrustedRandomAccess for IntoIter<T, A>
+//
+// TrustedRandomAccess (without NoCoerce) must not be implemented because
+// subtypes/supertypes of `T` might not be `Copy`
+unsafe impl<T, A: Allocator> TrustedRandomAccessNoCoerce for IntoIter<T, A>
 where
     T: Copy,
 {
     const MAY_HAVE_SIDE_EFFECT: bool = false;
 }
 
+#[cfg(not(no_global_oom_handling))]
 #[stable(feature = "vec_into_iter_clone", since = "1.8.0")]
 impl<T: Clone, A: Allocator + Clone> Clone for IntoIter<T, A> {
     #[cfg(not(test))]
@@ -253,9 +270,11 @@ unsafe impl<#[may_dangle] T, A: Allocator> Drop for IntoIter<T, A> {
 }
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
+#[doc(hidden)]
 unsafe impl<T, A: Allocator> InPlaceIterable for IntoIter<T, A> {}
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
+#[doc(hidden)]
 unsafe impl<T, A: Allocator> SourceIter for IntoIter<T, A> {
     type Source = Self;
 

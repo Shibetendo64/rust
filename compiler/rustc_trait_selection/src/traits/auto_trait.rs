@@ -12,6 +12,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 
 use std::collections::hash_map::Entry;
 use std::collections::VecDeque;
+use std::iter;
 
 // FIXME(twk): this is obviously not nice to duplicate like that
 #[derive(Eq, PartialEq, Hash, Copy, Clone, Debug)]
@@ -83,7 +84,7 @@ impl<'tcx> AutoTraitFinder<'tcx> {
 
         let trait_ref = ty::TraitRef { def_id: trait_did, substs: tcx.mk_substs_trait(ty, &[]) };
 
-        let trait_pred = ty::Binder::bind(trait_ref);
+        let trait_pred = ty::Binder::dummy(trait_ref);
 
         let bail_out = tcx.infer_ctxt().enter(|infcx| {
             let mut selcx = SelectionContext::with_negative(&infcx, true);
@@ -279,11 +280,12 @@ impl AutoTraitFinder<'tcx> {
 
         let mut already_visited = FxHashSet::default();
         let mut predicates = VecDeque::new();
-        predicates.push_back(ty::Binder::bind(ty::TraitPredicate {
+        predicates.push_back(ty::Binder::dummy(ty::TraitPredicate {
             trait_ref: ty::TraitRef {
                 def_id: trait_did,
                 substs: infcx.tcx.mk_substs_trait(ty, &[]),
             },
+            constness: ty::BoundConstness::NotConst,
         }));
 
         let computed_preds = param_env.caller_bounds().iter();
@@ -343,10 +345,7 @@ impl AutoTraitFinder<'tcx> {
                 Err(SelectionError::Unimplemented) => {
                     if self.is_param_no_infer(pred.skip_binder().trait_ref.substs) {
                         already_visited.remove(&pred);
-                        self.add_user_pred(
-                            &mut user_computed_preds,
-                            pred.without_const().to_predicate(self.tcx),
-                        );
+                        self.add_user_pred(&mut user_computed_preds, pred.to_predicate(self.tcx));
                         predicates.push_back(pred);
                     } else {
                         debug!(
@@ -413,10 +412,8 @@ impl AutoTraitFinder<'tcx> {
     ) {
         let mut should_add_new = true;
         user_computed_preds.retain(|&old_pred| {
-            if let (
-                ty::PredicateKind::Trait(new_trait, _),
-                ty::PredicateKind::Trait(old_trait, _),
-            ) = (new_pred.kind().skip_binder(), old_pred.kind().skip_binder())
+            if let (ty::PredicateKind::Trait(new_trait), ty::PredicateKind::Trait(old_trait)) =
+                (new_pred.kind().skip_binder(), old_pred.kind().skip_binder())
             {
                 if new_trait.def_id() == old_trait.def_id() {
                     let new_substs = new_trait.trait_ref.substs;
@@ -428,7 +425,9 @@ impl AutoTraitFinder<'tcx> {
                         return true;
                     }
 
-                    for (new_region, old_region) in new_substs.regions().zip(old_substs.regions()) {
+                    for (new_region, old_region) in
+                        iter::zip(new_substs.regions(), old_substs.regions())
+                    {
                         match (new_region, old_region) {
                             // If both predicates have an `ReLateBound` (a HRTB) in the
                             // same spot, we do nothing.
@@ -635,7 +634,7 @@ impl AutoTraitFinder<'tcx> {
 
             let bound_predicate = predicate.kind();
             match bound_predicate.skip_binder() {
-                ty::PredicateKind::Trait(p, _) => {
+                ty::PredicateKind::Trait(p) => {
                     // Add this to `predicates` so that we end up calling `select`
                     // with it. If this predicate ends up being unimplemented,
                     // then `evaluate_predicates` will handle adding it the `ParamEnv`
@@ -803,12 +802,10 @@ impl AutoTraitFinder<'tcx> {
                 }
                 ty::PredicateKind::ConstEquate(c1, c2) => {
                     let evaluate = |c: &'tcx ty::Const<'tcx>| {
-                        if let ty::ConstKind::Unevaluated(def, substs, promoted) = c.val {
+                        if let ty::ConstKind::Unevaluated(unevaluated) = c.val {
                             match select.infcx().const_eval_resolve(
                                 obligation.param_env,
-                                def,
-                                substs,
-                                promoted,
+                                unevaluated,
                                 Some(obligation.cause.span),
                             ) {
                                 Ok(val) => Ok(ty::Const::from_value(select.tcx(), val, c.ty)),

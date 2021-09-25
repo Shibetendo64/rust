@@ -1,4 +1,6 @@
-use crate::iter::adapters::{zip::try_get_unchecked, SourceIter, TrustedRandomAccess};
+use crate::iter::adapters::{
+    zip::try_get_unchecked, SourceIter, TrustedRandomAccess, TrustedRandomAccessNoCoerce,
+};
 use crate::iter::{FusedIterator, InPlaceIterable, TrustedLen};
 use crate::ops::Try;
 
@@ -71,7 +73,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         #[inline]
         fn enumerate<'a, T, Acc, R>(
@@ -111,9 +113,10 @@ where
     }
 
     #[rustc_inherit_overflow_checks]
+    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> <Self as Iterator>::Item
     where
-        Self: TrustedRandomAccess,
+        Self: TrustedRandomAccessNoCoerce,
     {
         // SAFETY: the caller must uphold the contract for
         // `Iterator::__iterator_get_unchecked`.
@@ -150,7 +153,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         // Can safely add and subtract the count, as `ExactSizeIterator` promises
         // that the number of elements fits into a `usize`.
@@ -206,9 +209,13 @@ where
 
 #[doc(hidden)]
 #[unstable(feature = "trusted_random_access", issue = "none")]
-unsafe impl<I> TrustedRandomAccess for Enumerate<I>
+unsafe impl<I> TrustedRandomAccess for Enumerate<I> where I: TrustedRandomAccess {}
+
+#[doc(hidden)]
+#[unstable(feature = "trusted_random_access", issue = "none")]
+unsafe impl<I> TrustedRandomAccessNoCoerce for Enumerate<I>
 where
-    I: TrustedRandomAccess,
+    I: TrustedRandomAccessNoCoerce,
 {
     const MAY_HAVE_SIDE_EFFECT: bool = I::MAY_HAVE_SIDE_EFFECT;
 }

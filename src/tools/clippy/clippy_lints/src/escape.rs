@@ -1,16 +1,17 @@
+use clippy_utils::diagnostics::span_lint;
+use clippy_utils::ty::contains_ty;
 use rustc_hir::intravisit;
 use rustc_hir::{self, AssocItemKind, Body, FnDecl, HirId, HirIdSet, Impl, ItemKind, Node};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::mir::FakeReadCause;
+use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, TraitRef, Ty};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Span;
 use rustc_span::symbol::kw;
-use rustc_target::abi::LayoutOf;
 use rustc_target::spec::abi::Abi;
-use rustc_typeck::expr_use_visitor::{ConsumeMode, Delegate, ExprUseVisitor, PlaceBase, PlaceWithHirId};
-
-use crate::utils::{contains_ty, span_lint};
+use rustc_typeck::expr_use_visitor::{Delegate, ExprUseVisitor, PlaceBase, PlaceWithHirId};
 
 #[derive(Copy, Clone)]
 pub struct BoxedLocal {
@@ -18,16 +19,16 @@ pub struct BoxedLocal {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `Box<T>` where an unboxed `T` would
+    /// ### What it does
+    /// Checks for usage of `Box<T>` where an unboxed `T` would
     /// work fine.
     ///
-    /// **Why is this bad?** This is an unnecessary allocation, and bad for
+    /// ### Why is this bad?
+    /// This is an unnecessary allocation, and bad for
     /// performance. It is only necessary to allocate if you wish to move the box
     /// into something.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # fn foo(bar: usize) {}
     /// // Bad
@@ -52,7 +53,7 @@ fn is_non_trait_box(ty: Ty<'_>) -> bool {
 struct EscapeDelegate<'a, 'tcx> {
     cx: &'a LateContext<'tcx>,
     set: HirIdSet,
-    trait_self_ty: Option<Ty<'a>>,
+    trait_self_ty: Option<Ty<'tcx>>,
     too_large_for_stack: u64,
 }
 
@@ -91,7 +92,7 @@ impl<'tcx> LateLintPass<'tcx> for BoxedLocal {
                         // be sure we have `self` parameter in this function
                         if let AssocItemKind::Fn { has_self: true } = trait_item.kind {
                             trait_self_ty =
-                                Some(TraitRef::identity(cx.tcx, trait_item.id.def_id.to_def_id()).self_ty());
+                                Some(TraitRef::identity(cx.tcx, trait_item.id.def_id.to_def_id()).self_ty().skip_binder());
                         }
                     }
                 }
@@ -132,13 +133,10 @@ fn is_argument(map: rustc_middle::hir::map::Map<'_>, id: HirId) -> bool {
 }
 
 impl<'a, 'tcx> Delegate<'tcx> for EscapeDelegate<'a, 'tcx> {
-    fn consume(&mut self, cmt: &PlaceWithHirId<'tcx>, _: HirId, mode: ConsumeMode) {
+    fn consume(&mut self, cmt: &PlaceWithHirId<'tcx>, _: HirId) {
         if cmt.place.projections.is_empty() {
             if let PlaceBase::Local(lid) = cmt.place.base {
-                if let ConsumeMode::Move = mode {
-                    // moved out or in. clearly can't be localized
-                    self.set.remove(&lid);
-                }
+                self.set.remove(&lid);
                 let map = &self.cx.tcx.hir();
                 if let Some(Node::Binding(_)) = map.find(cmt.hir_id) {
                     if self.set.contains(&lid) {
@@ -173,7 +171,8 @@ impl<'a, 'tcx> Delegate<'tcx> for EscapeDelegate<'a, 'tcx> {
                 // skip if there is a `self` parameter binding to a type
                 // that contains `Self` (i.e.: `self: Box<Self>`), see #4804
                 if let Some(trait_self_ty) = self.trait_self_ty {
-                    if map.name(cmt.hir_id) == kw::SelfLower && contains_ty(cmt.place.ty(), trait_self_ty) {
+                    if map.name(cmt.hir_id) == kw::SelfLower && contains_ty(self.cx.tcx, cmt.place.ty(), trait_self_ty)
+                    {
                         return;
                     }
                 }
@@ -184,6 +183,8 @@ impl<'a, 'tcx> Delegate<'tcx> for EscapeDelegate<'a, 'tcx> {
             }
         }
     }
+
+    fn fake_read(&mut self, _: rustc_typeck::expr_use_visitor::Place<'tcx>, _: FakeReadCause, _: HirId) {}
 }
 
 impl<'a, 'tcx> EscapeDelegate<'a, 'tcx> {

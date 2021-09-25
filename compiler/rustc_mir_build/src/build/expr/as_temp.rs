@@ -2,10 +2,10 @@
 
 use crate::build::scope::DropKind;
 use crate::build::{BlockAnd, BlockAndExtension, Builder};
-use crate::thir::*;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_middle::middle::region;
 use rustc_middle::mir::*;
+use rustc_middle::thir::*;
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Compile `expr` into a fresh temporary. This is used when building
@@ -14,7 +14,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         &mut self,
         block: BasicBlock,
         temp_lifetime: Option<region::Scope>,
-        expr: &Expr<'_, 'tcx>,
+        expr: &Expr<'tcx>,
         mutability: Mutability,
     ) -> BlockAnd<Local> {
         // this is the only place in mir building that we need to truly need to worry about
@@ -27,7 +27,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         &mut self,
         mut block: BasicBlock,
         temp_lifetime: Option<region::Scope>,
-        expr: &Expr<'_, 'tcx>,
+        expr: &Expr<'tcx>,
         mutability: Mutability,
     ) -> BlockAnd<Local> {
         debug!(
@@ -40,7 +40,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let source_info = this.source_info(expr_span);
         if let ExprKind::Scope { region_scope, lint_level, value } = expr.kind {
             return this.in_scope((region_scope, source_info), lint_level, |this| {
-                this.as_temp(block, temp_lifetime, value, mutability)
+                this.as_temp(block, temp_lifetime, &this.thir[value], mutability)
             });
         }
 
@@ -62,16 +62,16 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     assert!(!this.tcx.is_thread_local_static(def_id));
                     local_decl.internal = true;
                     local_decl.local_info =
-                        Some(box LocalInfo::StaticRef { def_id, is_thread_local: false });
+                        Some(Box::new(LocalInfo::StaticRef { def_id, is_thread_local: false }));
                 }
                 ExprKind::ThreadLocalRef(def_id) => {
                     assert!(this.tcx.is_thread_local_static(def_id));
                     local_decl.internal = true;
                     local_decl.local_info =
-                        Some(box LocalInfo::StaticRef { def_id, is_thread_local: true });
+                        Some(Box::new(LocalInfo::StaticRef { def_id, is_thread_local: true }));
                 }
                 ExprKind::Literal { const_id: Some(def_id), .. } => {
-                    local_decl.local_info = Some(box LocalInfo::ConstRef { def_id });
+                    local_decl.local_info = Some(Box::new(LocalInfo::ConstRef { def_id }));
                 }
                 _ => {}
             }

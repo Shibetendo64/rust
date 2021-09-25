@@ -315,7 +315,7 @@ fn has_physical_root(s: &[u8], prefix: Option<Prefix<'_>>) -> bool {
 }
 
 // basic workhorse for splitting stem and extension
-fn split_file_at_dot(file: &OsStr) -> (Option<&OsStr>, Option<&OsStr>) {
+fn rsplit_file_at_dot(file: &OsStr) -> (Option<&OsStr>, Option<&OsStr>) {
     if os_str_as_u8_slice(file) == b".." {
         return (Some(file), None);
     }
@@ -332,6 +332,25 @@ fn split_file_at_dot(file: &OsStr) -> (Option<&OsStr>, Option<&OsStr>) {
     } else {
         unsafe { (before.map(|s| u8_slice_as_os_str(s)), after.map(|s| u8_slice_as_os_str(s))) }
     }
+}
+
+fn split_file_at_dot(file: &OsStr) -> (&OsStr, Option<&OsStr>) {
+    let slice = os_str_as_u8_slice(file);
+    if slice == b".." {
+        return (file, None);
+    }
+
+    // The unsafety here stems from converting between &OsStr and &[u8]
+    // and back. This is safe to do because (1) we only look at ASCII
+    // contents of the encoding and (2) new &OsStr values are produced
+    // only from ASCII-bounded slices of existing &OsStr values.
+    let i = match slice[1..].iter().position(|b| *b == b'.') {
+        Some(i) => i + 1,
+        None => return (file, None),
+    };
+    let before = &slice[..i];
+    let after = &slice[i + 1..];
+    unsafe { (u8_slice_as_os_str(before), Some(u8_slice_as_os_str(after))) }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -569,7 +588,7 @@ pub struct Components<'a> {
     prefix: Option<Prefix<'a>>,
 
     // true if path *physically* has a root separator; for most Windows
-    // prefixes, it may have a "logical" rootseparator for the purposes of
+    // prefixes, it may have a "logical" root separator for the purposes of
     // normalization, e.g.,  \\server\share == \\server\share\.
     has_physical_root: bool,
 
@@ -951,7 +970,7 @@ impl FusedIterator for Components<'_> {}
 impl<'a> cmp::PartialEq for Components<'a> {
     #[inline]
     fn eq(&self, other: &Components<'a>) -> bool {
-        Iterator::eq(self.clone(), other.clone())
+        Iterator::eq(self.clone().rev(), other.clone().rev())
     }
 }
 
@@ -962,7 +981,7 @@ impl cmp::Eq for Components<'_> {}
 impl<'a> cmp::PartialOrd for Components<'a> {
     #[inline]
     fn partial_cmp(&self, other: &Components<'a>) -> Option<cmp::Ordering> {
-        Iterator::partial_cmp(self.clone(), other.clone())
+        Some(compare_components(self.clone(), other.clone()))
     }
 }
 
@@ -970,8 +989,41 @@ impl<'a> cmp::PartialOrd for Components<'a> {
 impl cmp::Ord for Components<'_> {
     #[inline]
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        Iterator::cmp(self.clone(), other.clone())
+        compare_components(self.clone(), other.clone())
     }
+}
+
+fn compare_components(mut left: Components<'_>, mut right: Components<'_>) -> cmp::Ordering {
+    // Fast path for long shared prefixes
+    //
+    // - compare raw bytes to find first mismatch
+    // - backtrack to find separator before mismatch to avoid ambiguous parsings of '.' or '..' characters
+    // - if found update state to only do a component-wise comparison on the remainder,
+    //   otherwise do it on the full path
+    //
+    // The fast path isn't taken for paths with a PrefixComponent to avoid backtracking into
+    // the middle of one
+    if left.prefix.is_none() && right.prefix.is_none() && left.front == right.front {
+        // this might benefit from a [u8]::first_mismatch simd implementation, if it existed
+        let first_difference =
+            match left.path.iter().zip(right.path.iter()).position(|(&a, &b)| a != b) {
+                None if left.path.len() == right.path.len() => return cmp::Ordering::Equal,
+                None => left.path.len().min(right.path.len()),
+                Some(diff) => diff,
+            };
+
+        if let Some(previous_sep) =
+            left.path[..first_difference].iter().rposition(|&b| left.is_sep_byte(b))
+        {
+            let mismatched_component_start = previous_sep + 1;
+            left.path = &left.path[mismatched_component_start..];
+            left.front = State::Body;
+            right.path = &right.path[mismatched_component_start..];
+            right.front = State::Body;
+        }
+    }
+
+    Iterator::cmp(left, right)
 }
 
 /// An iterator over [`Path`] and its ancestors.
@@ -1065,7 +1117,6 @@ impl FusedIterator for Ancestors<'_> {}
 /// ```
 ///
 /// Which method works best depends on what kind of situation you're in.
-#[derive(Clone)]
 #[cfg_attr(not(test), rustc_diagnostic_item = "PathBuf")]
 #[stable(feature = "rust1", since = "1.0.0")]
 // FIXME:
@@ -1399,15 +1450,31 @@ impl PathBuf {
     /// Invokes [`shrink_to`] on the underlying instance of [`OsString`].
     ///
     /// [`shrink_to`]: OsString::shrink_to
-    #[unstable(feature = "shrink_to", issue = "56431")]
+    #[stable(feature = "shrink_to", since = "1.56.0")]
     #[inline]
     pub fn shrink_to(&mut self, min_capacity: usize) {
         self.inner.shrink_to(min_capacity)
     }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Clone for PathBuf {
+    #[inline]
+    fn clone(&self) -> Self {
+        PathBuf { inner: self.inner.clone() }
+    }
+
+    #[inline]
+    fn clone_from(&mut self, source: &Self) {
+        self.inner.clone_from(&source.inner)
+    }
+}
+
 #[stable(feature = "box_from_path", since = "1.17.0")]
 impl From<&Path> for Box<Path> {
+    /// Creates a boxed [`Path`] from a reference.
+    ///
+    /// This will allocate and clone `path` to it.
     fn from(path: &Path) -> Box<Path> {
         let boxed: Box<OsStr> = path.inner.into();
         let rw = Box::into_raw(boxed) as *mut Path;
@@ -1417,6 +1484,9 @@ impl From<&Path> for Box<Path> {
 
 #[stable(feature = "box_from_cow", since = "1.45.0")]
 impl From<Cow<'_, Path>> for Box<Path> {
+    /// Creates a boxed [`Path`] from a clone-on-write pointer.
+    ///
+    /// Converting from a `Cow::Owned` does not clone or allocate.
     #[inline]
     fn from(cow: Cow<'_, Path>) -> Box<Path> {
         match cow {
@@ -1459,6 +1529,9 @@ impl Clone for Box<Path> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized + AsRef<OsStr>> From<&T> for PathBuf {
+    /// Converts a borrowed `OsStr` to a `PathBuf`.
+    ///
+    /// Allocates a [`PathBuf`] and copies the data into it.
     #[inline]
     fn from(s: &T) -> PathBuf {
         PathBuf::from(s.as_ref().to_os_string())
@@ -1467,7 +1540,7 @@ impl<T: ?Sized + AsRef<OsStr>> From<&T> for PathBuf {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl From<OsString> for PathBuf {
-    /// Converts a `OsString` into a `PathBuf`
+    /// Converts an [`OsString`] into a [`PathBuf`]
     ///
     /// This conversion does not allocate or copy memory.
     #[inline]
@@ -1478,7 +1551,7 @@ impl From<OsString> for PathBuf {
 
 #[stable(feature = "from_path_buf_for_os_string", since = "1.14.0")]
 impl From<PathBuf> for OsString {
-    /// Converts a `PathBuf` into a `OsString`
+    /// Converts a [`PathBuf`] into an [`OsString`]
     ///
     /// This conversion does not allocate or copy memory.
     #[inline]
@@ -1489,7 +1562,7 @@ impl From<PathBuf> for OsString {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl From<String> for PathBuf {
-    /// Converts a `String` into a `PathBuf`
+    /// Converts a [`String`] into a [`PathBuf`]
     ///
     /// This conversion does not allocate or copy memory.
     #[inline]
@@ -1563,6 +1636,10 @@ impl Default for PathBuf {
 
 #[stable(feature = "cow_from_path", since = "1.6.0")]
 impl<'a> From<&'a Path> for Cow<'a, Path> {
+    /// Creates a clone-on-write pointer from a reference to
+    /// [`Path`].
+    ///
+    /// This conversion does not clone or allocate.
     #[inline]
     fn from(s: &'a Path) -> Cow<'a, Path> {
         Cow::Borrowed(s)
@@ -1571,6 +1648,10 @@ impl<'a> From<&'a Path> for Cow<'a, Path> {
 
 #[stable(feature = "cow_from_path", since = "1.6.0")]
 impl<'a> From<PathBuf> for Cow<'a, Path> {
+    /// Creates a clone-on-write pointer from an owned
+    /// instance of [`PathBuf`].
+    ///
+    /// This conversion does not clone or allocate.
     #[inline]
     fn from(s: PathBuf) -> Cow<'a, Path> {
         Cow::Owned(s)
@@ -1579,6 +1660,10 @@ impl<'a> From<PathBuf> for Cow<'a, Path> {
 
 #[stable(feature = "cow_from_pathbuf_ref", since = "1.28.0")]
 impl<'a> From<&'a PathBuf> for Cow<'a, Path> {
+    /// Creates a clone-on-write pointer from a reference to
+    /// [`PathBuf`].
+    ///
+    /// This conversion does not clone or allocate.
     #[inline]
     fn from(p: &'a PathBuf) -> Cow<'a, Path> {
         Cow::Borrowed(p.as_path())
@@ -1587,6 +1672,9 @@ impl<'a> From<&'a PathBuf> for Cow<'a, Path> {
 
 #[stable(feature = "pathbuf_from_cow_path", since = "1.28.0")]
 impl<'a> From<Cow<'a, Path>> for PathBuf {
+    /// Converts a clone-on-write pointer to an owned path.
+    ///
+    /// Converting from a `Cow::Owned` does not clone or allocate.
     #[inline]
     fn from(p: Cow<'a, Path>) -> Self {
         p.into_owned()
@@ -1595,7 +1683,7 @@ impl<'a> From<Cow<'a, Path>> for PathBuf {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<PathBuf> for Arc<Path> {
-    /// Converts a `PathBuf` into an `Arc` by moving the `PathBuf` data into a new `Arc` buffer.
+    /// Converts a [`PathBuf`] into an [`Arc`] by moving the [`PathBuf`] data into a new [`Arc`] buffer.
     #[inline]
     fn from(s: PathBuf) -> Arc<Path> {
         let arc: Arc<OsStr> = Arc::from(s.into_os_string());
@@ -1605,7 +1693,7 @@ impl From<PathBuf> for Arc<Path> {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<&Path> for Arc<Path> {
-    /// Converts a `Path` into an `Arc` by copying the `Path` data into a new `Arc` buffer.
+    /// Converts a [`Path`] into an [`Arc`] by copying the [`Path`] data into a new [`Arc`] buffer.
     #[inline]
     fn from(s: &Path) -> Arc<Path> {
         let arc: Arc<OsStr> = Arc::from(s.as_os_str());
@@ -1615,7 +1703,7 @@ impl From<&Path> for Arc<Path> {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<PathBuf> for Rc<Path> {
-    /// Converts a `PathBuf` into an `Rc` by moving the `PathBuf` data into a new `Rc` buffer.
+    /// Converts a [`PathBuf`] into an [`Rc`] by moving the [`PathBuf`] data into a new `Rc` buffer.
     #[inline]
     fn from(s: PathBuf) -> Rc<Path> {
         let rc: Rc<OsStr> = Rc::from(s.into_os_string());
@@ -1625,7 +1713,7 @@ impl From<PathBuf> for Rc<Path> {
 
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<&Path> for Rc<Path> {
-    /// Converts a `Path` into an `Rc` by copying the `Path` data into a new `Rc` buffer.
+    /// Converts a [`Path`] into an [`Rc`] by copying the [`Path`] data into a new `Rc` buffer.
     #[inline]
     fn from(s: &Path) -> Rc<Path> {
         let rc: Rc<OsStr> = Rc::from(s.as_os_str());
@@ -1668,7 +1756,7 @@ impl cmp::Eq for PathBuf {}
 impl cmp::PartialOrd for PathBuf {
     #[inline]
     fn partial_cmp(&self, other: &PathBuf) -> Option<cmp::Ordering> {
-        self.components().partial_cmp(other.components())
+        Some(compare_components(self.components(), other.components()))
     }
 }
 
@@ -1676,7 +1764,7 @@ impl cmp::PartialOrd for PathBuf {
 impl cmp::Ord for PathBuf {
     #[inline]
     fn cmp(&self, other: &PathBuf) -> cmp::Ordering {
-        self.components().cmp(other.components())
+        compare_components(self.components(), other.components())
     }
 }
 
@@ -2144,9 +2232,49 @@ impl Path {
     /// assert_eq!("foo", Path::new("foo.rs").file_stem().unwrap());
     /// assert_eq!("foo.tar", Path::new("foo.tar.gz").file_stem().unwrap());
     /// ```
+    ///
+    /// # See Also
+    /// This method is similar to [`Path::file_prefix`], which extracts the portion of the file name
+    /// before the *first* `.`
+    ///
+    /// [`Path::file_prefix`]: Path::file_prefix
+    ///
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn file_stem(&self) -> Option<&OsStr> {
-        self.file_name().map(split_file_at_dot).and_then(|(before, after)| before.or(after))
+        self.file_name().map(rsplit_file_at_dot).and_then(|(before, after)| before.or(after))
+    }
+
+    /// Extracts the prefix of [`self.file_name`].
+    ///
+    /// The prefix is:
+    ///
+    /// * [`None`], if there is no file name;
+    /// * The entire file name if there is no embedded `.`;
+    /// * The portion of the file name before the first non-beginning `.`;
+    /// * The entire file name if the file name begins with `.` and has no other `.`s within;
+    /// * The portion of the file name before the second `.` if the file name begins with `.`
+    ///
+    /// [`self.file_name`]: Path::file_name
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #![feature(path_file_prefix)]
+    /// use std::path::Path;
+    ///
+    /// assert_eq!("foo", Path::new("foo.rs").file_prefix().unwrap());
+    /// assert_eq!("foo", Path::new("foo.tar.gz").file_prefix().unwrap());
+    /// ```
+    ///
+    /// # See Also
+    /// This method is similar to [`Path::file_stem`], which extracts the portion of the file name
+    /// before the *last* `.`
+    ///
+    /// [`Path::file_stem`]: Path::file_stem
+    ///
+    #[unstable(feature = "path_file_prefix", issue = "86319")]
+    pub fn file_prefix(&self) -> Option<&OsStr> {
+        self.file_name().map(split_file_at_dot).and_then(|(before, _after)| Some(before))
     }
 
     /// Extracts the extension of [`self.file_name`], if possible.
@@ -2170,7 +2298,7 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn extension(&self) -> Option<&OsStr> {
-        self.file_name().map(split_file_at_dot).and_then(|(before, after)| before.and(after))
+        self.file_name().map(rsplit_file_at_dot).and_then(|(before, after)| before.and(after))
     }
 
     /// Creates an owned [`PathBuf`] with `path` adjoined to `self`.
@@ -2450,10 +2578,10 @@ impl Path {
     /// Returns `true` if the path points at an existing entity.
     ///
     /// This function will traverse symbolic links to query information about the
-    /// destination file. In case of broken symbolic links this will return `false`.
+    /// destination file.
     ///
-    /// If you cannot access the directory containing the file, e.g., because of a
-    /// permission error, this will return `false`.
+    /// If you cannot access the metadata of the file, e.g. because of a
+    /// permission error or broken symbolic links, this will return `false`.
     ///
     /// # Examples
     ///
@@ -2472,13 +2600,39 @@ impl Path {
         fs::metadata(self).is_ok()
     }
 
+    /// Returns `Ok(true)` if the path points at an existing entity.
+    ///
+    /// This function will traverse symbolic links to query information about the
+    /// destination file. In case of broken symbolic links this will return `Ok(false)`.
+    ///
+    /// As opposed to the `exists()` method, this one doesn't silently ignore errors
+    /// unrelated to the path not existing. (E.g. it will return `Err(_)` in case of permission
+    /// denied on some of the parent directories.)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// #![feature(path_try_exists)]
+    ///
+    /// use std::path::Path;
+    /// assert!(!Path::new("does_not_exist.txt").try_exists().expect("Can't check existence of file does_not_exist.txt"));
+    /// assert!(Path::new("/root/secret_file.txt").try_exists().is_err());
+    /// ```
+    // FIXME: stabilization should modify documentation of `exists()` to recommend this method
+    // instead.
+    #[unstable(feature = "path_try_exists", issue = "83186")]
+    #[inline]
+    pub fn try_exists(&self) -> io::Result<bool> {
+        fs::try_exists(self)
+    }
+
     /// Returns `true` if the path exists on disk and is pointing at a regular file.
     ///
     /// This function will traverse symbolic links to query information about the
-    /// destination file. In case of broken symbolic links this will return `false`.
+    /// destination file.
     ///
-    /// If you cannot access the directory containing the file, e.g., because of a
-    /// permission error, this will return `false`.
+    /// If you cannot access the metadata of the file, e.g. because of a
+    /// permission error or broken symbolic links, this will return `false`.
     ///
     /// # Examples
     ///
@@ -2507,10 +2661,10 @@ impl Path {
     /// Returns `true` if the path exists on disk and is pointing at a directory.
     ///
     /// This function will traverse symbolic links to query information about the
-    /// destination file. In case of broken symbolic links this will return `false`.
+    /// destination file.
     ///
-    /// If you cannot access the directory containing the file, e.g., because of a
-    /// permission error, this will return `false`.
+    /// If you cannot access the metadata of the file, e.g. because of a
+    /// permission error or broken symbolic links, this will return `false`.
     ///
     /// # Examples
     ///
@@ -2528,6 +2682,32 @@ impl Path {
     #[stable(feature = "path_ext", since = "1.5.0")]
     pub fn is_dir(&self) -> bool {
         fs::metadata(self).map(|m| m.is_dir()).unwrap_or(false)
+    }
+
+    /// Returns true if the path exists on disk and is pointing at a symbolic link.
+    ///
+    /// This function will not traverse symbolic links.
+    /// In case of a broken symbolic link this will also return true.
+    ///
+    /// If you cannot access the directory containing the file, e.g., because of a
+    /// permission error, this will return false.
+    ///
+    /// # Examples
+    ///
+    #[cfg_attr(unix, doc = "```no_run")]
+    #[cfg_attr(not(unix), doc = "```ignore")]
+    /// #![feature(is_symlink)]
+    /// use std::path::Path;
+    /// use std::os::unix::fs::symlink;
+    ///
+    /// let link_path = Path::new("link");
+    /// symlink("/origin_does_not_exists/", link_path).unwrap();
+    /// assert_eq!(link_path.is_symlink(), true);
+    /// assert_eq!(link_path.exists(), false);
+    /// ```
+    #[unstable(feature = "is_symlink", issue = "85748")]
+    pub fn is_symlink(&self) -> bool {
+        fs::symlink_metadata(self).map(|m| m.is_symlink()).unwrap_or(false)
     }
 
     /// Converts a [`Box<Path>`](Box) into a [`PathBuf`] without copying or
@@ -2598,7 +2778,7 @@ impl fmt::Display for Display<'_> {
 impl cmp::PartialEq for Path {
     #[inline]
     fn eq(&self, other: &Path) -> bool {
-        self.components().eq(other.components())
+        self.components() == other.components()
     }
 }
 
@@ -2618,7 +2798,7 @@ impl cmp::Eq for Path {}
 impl cmp::PartialOrd for Path {
     #[inline]
     fn partial_cmp(&self, other: &Path) -> Option<cmp::Ordering> {
-        self.components().partial_cmp(other.components())
+        Some(compare_components(self.components(), other.components()))
     }
 }
 
@@ -2626,7 +2806,7 @@ impl cmp::PartialOrd for Path {
 impl cmp::Ord for Path {
     #[inline]
     fn cmp(&self, other: &Path) -> cmp::Ordering {
-        self.components().cmp(other.components())
+        compare_components(self.components(), other.components())
     }
 }
 

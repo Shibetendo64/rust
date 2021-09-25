@@ -26,7 +26,7 @@
 //!   could not be instantiated because the current compilation session
 //!   contained no `DefId` for thing that had been removed.
 //!
-//! `DepNode` definition happens in `librustc_middle` with the `define_dep_nodes!()` macro.
+//! `DepNode` definition happens in `rustc_middle` with the `define_dep_nodes!()` macro.
 //! This macro defines the `DepKind` enum and a corresponding `DepConstructor` enum. The
 //! `DepConstructor` enum links a `DepKind` to the parameters that are needed at runtime in order
 //! to construct a valid `DepNode` fingerprint.
@@ -53,18 +53,6 @@ use std::hash::Hash;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
 pub struct DepNode<K> {
     pub kind: K,
-    // Important - whenever a `DepNode` is constructed, we need to make
-    // sure to register a `DefPathHash -> DefId` mapping if needed.
-    // This is currently done in two places:
-    //
-    // * When a `DepNode::construct` is called, `arg.to_fingerprint()`
-    //   is responsible for calling `OnDiskCache::store_foreign_def_id_hash`
-    //   if needed
-    // * When we serialize the on-disk cache, `OnDiskCache::serialize` is
-    //   responsible for calling `DepGraph::register_reused_dep_nodes`.
-    //
-    // FIXME: Enforce this by preventing manual construction of `DefNode`
-    // (e.g. add a `_priv: ()` field)
     pub hash: PackedFingerprint,
 }
 

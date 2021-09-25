@@ -2,6 +2,7 @@ use crate::rmeta::*;
 
 use rustc_index::vec::Idx;
 use rustc_serialize::opaque::Encoder;
+use rustc_serialize::Encoder as _;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -172,7 +173,7 @@ where
 
     pub(crate) fn encode(&self, buf: &mut Encoder) -> Lazy<Table<I, T>> {
         let pos = buf.position();
-        buf.emit_raw_bytes(&self.bytes);
+        buf.emit_raw_bytes(&self.bytes).unwrap();
         Lazy::from_position_and_meta(NonZeroUsize::new(pos as usize).unwrap(), self.bytes.len())
     }
 }
@@ -198,7 +199,7 @@ where
         debug!("Table::lookup: index={:?} len={:?}", i, self.meta);
 
         let start = self.position.get();
-        let bytes = &metadata.raw_bytes()[start..start + self.meta];
+        let bytes = &metadata.blob()[start..start + self.meta];
         <Option<T>>::maybe_read_from_bytes_at(bytes, i.index())?
     }
 

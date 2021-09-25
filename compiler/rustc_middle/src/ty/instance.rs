@@ -77,7 +77,7 @@ pub enum InstanceDef<'tcx> {
     /// `<[FnMut closure] as FnOnce>::call_once`.
     ///
     /// The `DefId` is the ID of the `call_once` method in `FnOnce`.
-    ClosureOnceShim { call_once: DefId },
+    ClosureOnceShim { call_once: DefId, track_caller: bool },
 
     /// `core::ptr::drop_in_place::<T>`.
     ///
@@ -146,7 +146,7 @@ impl<'tcx> InstanceDef<'tcx> {
             | InstanceDef::FnPtrShim(def_id, _)
             | InstanceDef::Virtual(def_id, _)
             | InstanceDef::Intrinsic(def_id)
-            | InstanceDef::ClosureOnceShim { call_once: def_id }
+            | InstanceDef::ClosureOnceShim { call_once: def_id, track_caller: _ }
             | InstanceDef::DropGlue(def_id, _)
             | InstanceDef::CloneShim(def_id, _) => def_id,
         }
@@ -161,7 +161,7 @@ impl<'tcx> InstanceDef<'tcx> {
             | InstanceDef::FnPtrShim(def_id, _)
             | InstanceDef::Virtual(def_id, _)
             | InstanceDef::Intrinsic(def_id)
-            | InstanceDef::ClosureOnceShim { call_once: def_id }
+            | InstanceDef::ClosureOnceShim { call_once: def_id, track_caller: _ }
             | InstanceDef::DropGlue(def_id, _)
             | InstanceDef::CloneShim(def_id, _) => ty::WithOptConstParam::unknown(def_id),
         }
@@ -216,9 +216,10 @@ impl<'tcx> InstanceDef<'tcx> {
             // drops of `Option::None` before LTO. We also respect the intent of
             // `#[inline]` on `Drop::drop` implementations.
             return ty.ty_adt_def().map_or(true, |adt_def| {
-                adt_def.destructor(tcx).map_or(adt_def.is_enum(), |dtor| {
-                    tcx.codegen_fn_attrs(dtor.did).requests_inline()
-                })
+                adt_def.destructor(tcx).map_or_else(
+                    || adt_def.is_enum(),
+                    |dtor| tcx.codegen_fn_attrs(dtor.did).requests_inline(),
+                )
             });
         }
         tcx.codegen_fn_attrs(self.def_id()).requests_inline()
@@ -226,9 +227,11 @@ impl<'tcx> InstanceDef<'tcx> {
 
     pub fn requires_caller_location(&self, tcx: TyCtxt<'_>) -> bool {
         match *self {
-            InstanceDef::Item(def) => {
-                tcx.codegen_fn_attrs(def.did).flags.contains(CodegenFnAttrFlags::TRACK_CALLER)
+            InstanceDef::Item(ty::WithOptConstParam { did: def_id, .. })
+            | InstanceDef::Virtual(def_id, _) => {
+                tcx.codegen_fn_attrs(def_id).flags.contains(CodegenFnAttrFlags::TRACK_CALLER)
             }
+            InstanceDef::ClosureOnceShim { call_once: _, track_caller } => track_caller,
             _ => false,
         }
     }
@@ -379,6 +382,8 @@ impl<'tcx> Instance<'tcx> {
         substs: SubstsRef<'tcx>,
     ) -> Option<Instance<'tcx>> {
         debug!("resolve(def_id={:?}, substs={:?})", def_id, substs);
+        // Use either `resolve_closure` or `resolve_for_vtable`
+        assert!(!tcx.is_closure(def_id), "Called `resolve_for_fn_ptr` on closure: {:?}", def_id);
         Instance::resolve(tcx, param_env, def_id, substs).ok().flatten().map(|mut resolved| {
             match resolved.def {
                 InstanceDef::Item(def) if resolved.def.requires_caller_location(tcx) => {
@@ -402,7 +407,7 @@ impl<'tcx> Instance<'tcx> {
         def_id: DefId,
         substs: SubstsRef<'tcx>,
     ) -> Option<Instance<'tcx>> {
-        debug!("resolve(def_id={:?}, substs={:?})", def_id, substs);
+        debug!("resolve_for_vtable(def_id={:?}, substs={:?})", def_id, substs);
         let fn_sig = tcx.fn_sig(def_id);
         let is_vtable_shim = !fn_sig.inputs().skip_binder().is_empty()
             && fn_sig.input(0).skip_binder().is_param(0)
@@ -411,7 +416,60 @@ impl<'tcx> Instance<'tcx> {
             debug!(" => associated item with unsizeable self: Self");
             Some(Instance { def: InstanceDef::VtableShim(def_id), substs })
         } else {
-            Instance::resolve_for_fn_ptr(tcx, param_env, def_id, substs)
+            Instance::resolve(tcx, param_env, def_id, substs).ok().flatten().map(|mut resolved| {
+                match resolved.def {
+                    InstanceDef::Item(def) => {
+                        // We need to generate a shim when we cannot guarantee that
+                        // the caller of a trait object method will be aware of
+                        // `#[track_caller]` - this ensures that the caller
+                        // and callee ABI will always match.
+                        //
+                        // The shim is generated when all of these conditions are met:
+                        //
+                        // 1) The underlying method expects a caller location parameter
+                        // in the ABI
+                        if resolved.def.requires_caller_location(tcx)
+                            // 2) The caller location parameter comes from having `#[track_caller]`
+                            // on the implementation, and *not* on the trait method.
+                            && !tcx.should_inherit_track_caller(def.did)
+                            // If the method implementation comes from the trait definition itself
+                            // (e.g. `trait Foo { #[track_caller] my_fn() { /* impl */ } }`),
+                            // then we don't need to generate a shim. This check is needed because
+                            // `should_inherit_track_caller` returns `false` if our method
+                            // implementation comes from the trait block, and not an impl block
+                            && !matches!(
+                                tcx.opt_associated_item(def.did),
+                                Some(ty::AssocItem {
+                                    container: ty::AssocItemContainer::TraitContainer(_),
+                                    ..
+                                })
+                            )
+                        {
+                            if tcx.is_closure(def.did) {
+                                debug!(" => vtable fn pointer created for closure with #[track_caller]: {:?} for method {:?} {:?}",
+                                       def.did, def_id, substs);
+
+                                // Create a shim for the `FnOnce/FnMut/Fn` method we are calling
+                                // - unlike functions, invoking a closure always goes through a
+                                // trait.
+                                resolved = Instance { def: InstanceDef::ReifyShim(def_id), substs };
+                            } else {
+                                debug!(
+                                    " => vtable fn pointer created for function with #[track_caller]: {:?}", def.did
+                                );
+                                resolved.def = InstanceDef::ReifyShim(def.did);
+                            }
+                        }
+                    }
+                    InstanceDef::Virtual(def_id, _) => {
+                        debug!(" => vtable fn pointer created for virtual call");
+                        resolved.def = InstanceDef::ReifyShim(def_id);
+                    }
+                    _ => {}
+                }
+
+                resolved
+            })
         }
     }
 
@@ -448,7 +506,9 @@ impl<'tcx> Instance<'tcx> {
             .find(|it| it.kind == ty::AssocKind::Fn)
             .unwrap()
             .def_id;
-        let def = ty::InstanceDef::ClosureOnceShim { call_once };
+        let track_caller =
+            tcx.codegen_fn_attrs(closure_did).flags.contains(CodegenFnAttrFlags::TRACK_CALLER);
+        let def = ty::InstanceDef::ClosureOnceShim { call_once, track_caller };
 
         let self_ty = tcx.mk_closure(closure_did, substs);
 
@@ -482,6 +542,7 @@ impl<'tcx> Instance<'tcx> {
         if let Some(substs) = self.substs_for_mir_body() { v.subst(tcx, substs) } else { *v }
     }
 
+    #[inline(always)]
     pub fn subst_mir_and_normalize_erasing_regions<T>(
         &self,
         tcx: TyCtxt<'tcx>,
@@ -593,7 +654,7 @@ fn polymorphize<'tcx>(
                 },
 
             // Simple case: If parameter is a const or type parameter..
-            ty::GenericParamDefKind::Const | ty::GenericParamDefKind::Type { .. } if
+            ty::GenericParamDefKind::Const { .. } | ty::GenericParamDefKind::Type { .. } if
                 // ..and is within range and unused..
                 unused.contains(param.index).unwrap_or(false) =>
                     // ..then use the identity for this parameter.

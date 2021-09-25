@@ -2,9 +2,9 @@
 
 use crate::build::expr::category::Category;
 use crate::build::{BlockAnd, BlockAndExtension, Builder};
-use crate::thir::*;
 use rustc_middle::middle::region;
 use rustc_middle::mir::*;
+use rustc_middle::thir::*;
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Returns an operand suitable for use until the end of the current
@@ -17,10 +17,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     crate fn as_local_operand(
         &mut self,
         block: BasicBlock,
-        expr: &Expr<'_, 'tcx>,
+        expr: &Expr<'tcx>,
     ) -> BlockAnd<Operand<'tcx>> {
         let local_scope = self.local_scope();
-        self.as_operand(block, Some(local_scope), expr)
+        self.as_operand(block, Some(local_scope), expr, None)
     }
 
     /// Returns an operand suitable for use until the end of the current scope expression and
@@ -74,7 +74,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     crate fn as_local_call_operand(
         &mut self,
         block: BasicBlock,
-        expr: &Expr<'_, 'tcx>,
+        expr: &Expr<'tcx>,
     ) -> BlockAnd<Operand<'tcx>> {
         let local_scope = self.local_scope();
         self.as_call_operand(block, Some(local_scope), expr)
@@ -85,6 +85,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// temporary `tmp = x`, so that we capture the value of `x` at
     /// this time.
     ///
+    /// If we end up needing to create a temporary, then we will use
+    /// `local_info` as its `LocalInfo`, unless `as_temporary`
+    /// has already assigned it a non-`None` `LocalInfo`.
+    /// Normally, you should use `None` for `local_info`
+    ///
     /// The operand is known to be live until the end of `scope`.
     ///
     /// Like `as_local_call_operand`, except that the argument will
@@ -93,16 +98,18 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         &mut self,
         mut block: BasicBlock,
         scope: Option<region::Scope>,
-        expr: &Expr<'_, 'tcx>,
+        expr: &Expr<'tcx>,
+        local_info: Option<Box<LocalInfo<'tcx>>>,
     ) -> BlockAnd<Operand<'tcx>> {
-        debug!("as_operand(block={:?}, expr={:?})", block, expr);
+        debug!("as_operand(block={:?}, expr={:?} local_info={:?})", block, expr, local_info);
         let this = self;
 
         if let ExprKind::Scope { region_scope, lint_level, value } = expr.kind {
             let source_info = this.source_info(expr.span);
             let region_scope = (region_scope, source_info);
-            return this
-                .in_scope(region_scope, lint_level, |this| this.as_operand(block, scope, value));
+            return this.in_scope(region_scope, lint_level, |this| {
+                this.as_operand(block, scope, &this.thir[value], local_info)
+            });
         }
 
         let category = Category::of(&expr.kind).unwrap();
@@ -110,10 +117,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         match category {
             Category::Constant => {
                 let constant = this.as_constant(expr);
-                block.and(Operand::Constant(box constant))
+                block.and(Operand::Constant(Box::new(constant)))
             }
             Category::Place | Category::Rvalue(..) => {
                 let operand = unpack!(block = this.as_temp(block, scope, expr, Mutability::Mut));
+                if this.local_decls[operand].local_info.is_none() {
+                    this.local_decls[operand].local_info = local_info;
+                }
                 block.and(Operand::Move(Place::from(operand)))
             }
         }
@@ -123,7 +133,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         &mut self,
         mut block: BasicBlock,
         scope: Option<region::Scope>,
-        expr: &Expr<'_, 'tcx>,
+        expr: &Expr<'tcx>,
     ) -> BlockAnd<Operand<'tcx>> {
         debug!("as_call_operand(block={:?}, expr={:?})", block, expr);
         let this = self;
@@ -132,7 +142,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             let source_info = this.source_info(expr.span);
             let region_scope = (region_scope, source_info);
             return this.in_scope(region_scope, lint_level, |this| {
-                this.as_call_operand(block, scope, value)
+                this.as_call_operand(block, scope, &this.thir[value])
             });
         }
 
@@ -151,7 +161,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 // type, and that value is coming from the deref of a box.
                 if let ExprKind::Deref { arg } = expr.kind {
                     // Generate let tmp0 = arg0
-                    let operand = unpack!(block = this.as_temp(block, scope, arg, Mutability::Mut));
+                    let operand = unpack!(
+                        block = this.as_temp(block, scope, &this.thir[arg], Mutability::Mut)
+                    );
 
                     // Return the operand *tmp0 to be used as the call argument
                     let place = Place {
@@ -164,6 +176,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
         }
 
-        this.as_operand(block, scope, expr)
+        this.as_operand(block, scope, expr, None)
     }
 }

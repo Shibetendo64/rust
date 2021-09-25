@@ -1,4 +1,5 @@
-use crate::utils::{is_type_diagnostic_item, span_lint_and_sugg};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::ty::is_type_diagnostic_item;
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Mutability};
@@ -7,17 +8,16 @@ use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `&mut Mutex::lock` calls
+    /// ### What it does
+    /// Checks for `&mut Mutex::lock` calls
     ///
-    /// **Why is this bad?** `Mutex::lock` is less efficient than
+    /// ### Why is this bad?
+    /// `Mutex::lock` is less efficient than
     /// calling `Mutex::get_mut`. In addition you also have a statically
     /// guarantee that the mutex isn't locked, instead of just a runtime
     /// guarantee.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// use std::sync::{Arc, Mutex};
     ///
@@ -47,9 +47,9 @@ declare_lint_pass!(MutMutexLock => [MUT_MUTEX_LOCK]);
 impl<'tcx> LateLintPass<'tcx> for MutMutexLock {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, ex: &'tcx Expr<'tcx>) {
         if_chain! {
-            if let ExprKind::MethodCall(path, method_span, args, _) = &ex.kind;
+            if let ExprKind::MethodCall(path, method_span, [self_arg, ..], _) = &ex.kind;
             if path.ident.name == sym!(lock);
-            let ty = cx.typeck_results().expr_ty(&args[0]);
+            let ty = cx.typeck_results().expr_ty(self_arg);
             if let ty::Ref(_, inner_ty, Mutability::Mut) = ty.kind();
             if is_type_diagnostic_item(cx, inner_ty, sym!(mutex_type));
             then {

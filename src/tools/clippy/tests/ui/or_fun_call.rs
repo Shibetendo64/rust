@@ -18,6 +18,19 @@ fn or_fun_call() {
         }
     }
 
+    struct FakeDefault;
+    impl FakeDefault {
+        fn default() -> Self {
+            FakeDefault
+        }
+    }
+
+    impl Default for FakeDefault {
+        fn default() -> Self {
+            FakeDefault
+        }
+    }
+
     enum Enum {
         A(i32),
     }
@@ -52,6 +65,12 @@ fn or_fun_call() {
 
     let with_default_type = Some(1);
     with_default_type.unwrap_or(u64::default());
+
+    let self_default = None::<FakeDefault>;
+    self_default.unwrap_or(<FakeDefault>::default());
+
+    let real_default = None::<FakeDefault>;
+    real_default.unwrap_or(<FakeDefault as Default>::default());
 
     let with_vec = Some(vec![1]);
     with_vec.unwrap_or(vec![]);
@@ -120,6 +139,9 @@ fn test_or_with_ctors() {
 
     let slice = &["foo"][..];
     let _ = opt.ok_or(slice.len());
+
+    let string = "foo";
+    let _ = opt.ok_or(string.len());
 }
 
 // Issue 4514 - early return
@@ -130,6 +152,20 @@ fn f() -> Option<()> {
     let _ = a.unwrap_or(b.checked_mul(3)?.min(240));
 
     Some(())
+}
+
+mod issue6675 {
+    unsafe fn foo() {
+        let mut s = "test".to_owned();
+        None.unwrap_or(s.as_mut_vec());
+    }
+
+    fn bar() {
+        let mut s = "test".to_owned();
+        None.unwrap_or(unsafe { s.as_mut_vec() });
+        #[rustfmt::skip]
+        None.unwrap_or( unsafe { s.as_mut_vec() }    );
+    }
 }
 
 fn main() {}

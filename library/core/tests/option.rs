@@ -301,18 +301,6 @@ fn test_try() {
         Some(val)
     }
     assert_eq!(try_option_none(), None);
-
-    fn try_option_ok() -> Result<u8, NoneError> {
-        let val = Some(1)?;
-        Ok(val)
-    }
-    assert_eq!(try_option_ok(), Ok(1));
-
-    fn try_option_err() -> Result<u8, NoneError> {
-        let val = None?;
-        Ok(val)
-    }
-    assert_eq!(try_option_err(), Err(NoneError));
 }
 
 #[test]
@@ -411,11 +399,43 @@ fn test_unwrap_drop() {
 }
 
 #[test]
-pub fn option_ext() {
+fn option_ext() {
     let thing = "{{ f }}";
     let f = thing.find("{{");
 
     if f.is_none() {
         println!("None!");
     }
+}
+
+#[test]
+fn zip_options() {
+    let x = Some(10);
+    let y = Some("foo");
+    let z: Option<usize> = None;
+
+    assert_eq!(x.zip(y), Some((10, "foo")));
+    assert_eq!(x.zip(z), None);
+    assert_eq!(z.zip(x), None);
+}
+
+#[test]
+fn unzip_options() {
+    let x = Some((10, "foo"));
+    let y = None::<(bool, i32)>;
+
+    assert_eq!(x.unzip(), (Some(10), Some("foo")));
+    assert_eq!(y.unzip(), (None, None));
+}
+
+#[test]
+fn zip_unzip_roundtrip() {
+    let x = Some(10);
+    let y = Some("foo");
+
+    let z = x.zip(y);
+    assert_eq!(z, Some((10, "foo")));
+
+    let a = z.unzip();
+    assert_eq!(a, (x, y));
 }

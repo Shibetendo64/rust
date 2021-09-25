@@ -31,17 +31,25 @@ use crate::num;
 use crate::str;
 use crate::string;
 use crate::sync::Arc;
+use crate::time;
 
 /// `Error` is a trait representing the basic expectations for error values,
-/// i.e., values of type `E` in [`Result<T, E>`]. Errors must describe
-/// themselves through the [`Display`] and [`Debug`] traits, and may provide
-/// cause chain information:
+/// i.e., values of type `E` in [`Result<T, E>`].
 ///
-/// [`Error::source()`] is generally used when errors cross
-/// "abstraction boundaries". If one module must report an error that is caused
-/// by an error from a lower-level module, it can allow accessing that error
-/// via [`Error::source()`]. This makes it possible for the high-level
-/// module to provide its own errors while also revealing some of the
+/// Errors must describe themselves through the [`Display`] and [`Debug`]
+/// traits. Error messages are typically concise lowercase sentences without
+/// trailing punctuation:
+///
+/// ```
+/// let err = "NaN".parse::<u32>().unwrap_err();
+/// assert_eq!(err.to_string(), "invalid digit found in string");
+/// ```
+///
+/// Errors may provide cause chain information. [`Error::source()`] is generally
+/// used when errors cross "abstraction boundaries". If one module must report
+/// an error that is caused by an error from a lower-level module, it can allow
+/// accessing that error via [`Error::source()`]. This makes it possible for the
+/// high-level module to provide its own errors while also revealing some of the
 /// implementation for debugging via `source` chains.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Error: Debug + Display {
@@ -175,7 +183,7 @@ impl<'a, E: Error + 'a> From<E> for Box<dyn Error + 'a> {
     ///
     /// impl fmt::Display for AnError {
     ///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    ///         write!(f , "An error")
+    ///         write!(f, "An error")
     ///     }
     /// }
     ///
@@ -208,7 +216,7 @@ impl<'a, E: Error + Send + Sync + 'a> From<E> for Box<dyn Error + Send + Sync + 
     ///
     /// impl fmt::Display for AnError {
     ///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    ///         write!(f , "An error")
+    ///         write!(f, "An error")
     ///     }
     /// }
     ///
@@ -589,6 +597,9 @@ impl Error for char::ParseCharError {
 
 #[unstable(feature = "try_reserve", reason = "new API", issue = "48043")]
 impl Error for alloc::collections::TryReserveError {}
+
+#[unstable(feature = "duration_checked_float", issue = "83400")]
+impl Error for time::FromSecsError {}
 
 // Copied from `any.rs`.
 impl dyn Error + 'static {

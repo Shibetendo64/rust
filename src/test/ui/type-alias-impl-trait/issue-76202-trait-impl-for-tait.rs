@@ -13,7 +13,8 @@ trait Test {
     fn test(self);
 }
 
-impl Test for F { //~ ERROR cannot implement trait
+impl Test for F {
+    //~^ ERROR cannot implement trait
     fn test(self) {}
 }
 

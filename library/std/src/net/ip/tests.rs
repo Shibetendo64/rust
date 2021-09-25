@@ -339,7 +339,6 @@ fn ipv4_properties() {
             let broadcast: u16 = 1 << 6;
             let documentation: u16 = 1 << 7;
             let benchmarking: u16 = 1 << 8;
-            let ietf_protocol_assignment: u16 = 1 << 9;
             let reserved: u16 = 1 << 10;
             let shared: u16 = 1 << 11;
 
@@ -397,12 +396,6 @@ fn ipv4_properties() {
                 assert!(!ip!($s).is_benchmarking());
             }
 
-            if ($mask & ietf_protocol_assignment) == ietf_protocol_assignment {
-                assert!(ip!($s).is_ietf_protocol_assignment());
-            } else {
-                assert!(!ip!($s).is_ietf_protocol_assignment());
-            }
-
             if ($mask & reserved) == reserved {
                 assert!(ip!($s).is_reserved());
             } else {
@@ -426,7 +419,6 @@ fn ipv4_properties() {
     let broadcast: u16 = 1 << 6;
     let documentation: u16 = 1 << 7;
     let benchmarking: u16 = 1 << 8;
-    let ietf_protocol_assignment: u16 = 1 << 9;
     let reserved: u16 = 1 << 10;
     let shared: u16 = 1 << 11;
 
@@ -449,9 +441,9 @@ fn ipv4_properties() {
     check!("198.18.0.0", benchmarking);
     check!("198.18.54.2", benchmarking);
     check!("198.19.255.255", benchmarking);
-    check!("192.0.0.0", ietf_protocol_assignment);
-    check!("192.0.0.255", ietf_protocol_assignment);
-    check!("192.0.0.100", ietf_protocol_assignment);
+    check!("192.0.0.0");
+    check!("192.0.0.255");
+    check!("192.0.0.100");
     check!("240.0.0.0", reserved);
     check!("251.54.1.76", reserved);
     check!("254.255.255.255", reserved);
@@ -480,8 +472,6 @@ fn ipv6_properties() {
             let unique_local: u16 = 1 << 2;
             let global: u16 = 1 << 3;
             let unicast_link_local: u16 = 1 << 4;
-            let unicast_link_local_strict: u16 = 1 << 5;
-            let unicast_site_local: u16 = 1 << 6;
             let unicast_global: u16 = 1 << 7;
             let documentation: u16 = 1 << 8;
             let multicast_interface_local: u16 = 1 << 9;
@@ -523,16 +513,6 @@ fn ipv6_properties() {
                 assert!(ip!($s).is_unicast_link_local());
             } else {
                 assert!(!ip!($s).is_unicast_link_local());
-            }
-            if ($mask & unicast_link_local_strict) == unicast_link_local_strict {
-                assert!(ip!($s).is_unicast_link_local_strict());
-            } else {
-                assert!(!ip!($s).is_unicast_link_local_strict());
-            }
-            if ($mask & unicast_site_local) == unicast_site_local {
-                assert!(ip!($s).is_unicast_site_local());
-            } else {
-                assert!(!ip!($s).is_unicast_site_local());
             }
             if ($mask & unicast_global) == unicast_global {
                 assert!(ip!($s).is_unicast_global());
@@ -587,8 +567,6 @@ fn ipv6_properties() {
     let unique_local: u16 = 1 << 2;
     let global: u16 = 1 << 3;
     let unicast_link_local: u16 = 1 << 4;
-    let unicast_link_local_strict: u16 = 1 << 5;
-    let unicast_site_local: u16 = 1 << 6;
     let unicast_global: u16 = 1 << 7;
     let documentation: u16 = 1 << 8;
     let multicast_interface_local: u16 = 1 << 9;
@@ -621,11 +599,7 @@ fn ipv6_properties() {
         unicast_link_local
     );
 
-    check!(
-        "fe80::",
-        &[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        unicast_link_local | unicast_link_local_strict
-    );
+    check!("fe80::", &[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], unicast_link_local);
 
     check!(
         "febf:ffff::",
@@ -650,7 +624,7 @@ fn ipv6_properties() {
             0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
             0xff, 0xff
         ],
-        unicast_link_local | unicast_link_local_strict
+        unicast_link_local
     );
 
     check!(
@@ -662,7 +636,7 @@ fn ipv6_properties() {
     check!(
         "fec0::",
         &[0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        unicast_site_local | unicast_global | global
+        unicast_global | global
     );
 
     check!(
@@ -841,9 +815,6 @@ fn ipv4_const() {
     const IS_SHARED: bool = IP_ADDRESS.is_shared();
     assert!(!IS_SHARED);
 
-    const IS_IETF_PROTOCOL_ASSIGNMENT: bool = IP_ADDRESS.is_ietf_protocol_assignment();
-    assert!(!IS_IETF_PROTOCOL_ASSIGNMENT);
-
     const IS_BENCHMARKING: bool = IP_ADDRESS.is_benchmarking();
     assert!(!IS_BENCHMARKING);
 
@@ -897,14 +868,8 @@ fn ipv6_const() {
     const IS_UNIQUE_LOCAL: bool = IP_ADDRESS.is_unique_local();
     assert!(!IS_UNIQUE_LOCAL);
 
-    const IS_UNICAST_LINK_LOCAL_STRICT: bool = IP_ADDRESS.is_unicast_link_local_strict();
-    assert!(!IS_UNICAST_LINK_LOCAL_STRICT);
-
     const IS_UNICAST_LINK_LOCAL: bool = IP_ADDRESS.is_unicast_link_local();
     assert!(!IS_UNICAST_LINK_LOCAL);
-
-    const IS_UNICAST_SITE_LOCAL: bool = IP_ADDRESS.is_unicast_site_local();
-    assert!(!IS_UNICAST_SITE_LOCAL);
 
     const IS_DOCUMENTATION: bool = IP_ADDRESS.is_documentation();
     assert!(!IS_DOCUMENTATION);
